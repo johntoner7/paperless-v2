@@ -1,0 +1,76 @@
+name: Deploy backend
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - 'Dockerfile.lambda'
+
+env:
+  AWS_REGION: eu-west-1
+  AWS_ACCOUNT: '165044447372'
+  ECR_REPO: paperless-be
+
+jobs:
+  deploy-presign:
+    name: Deploy presign Lambda
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Package and deploy presign handler
+        run: |
+          zip -j presign.zip backend/presign_handler.py
+          aws lambda update-function-code \
+            --function-name paperless-presign \
+            --zip-file fileb://presign.zip \
+            --region $AWS_REGION
+          aws lambda wait function-updated \
+            --function-name paperless-presign \
+            --region $AWS_REGION
+
+  deploy-renderer:
+    name: Deploy renderer Lambda
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push container image
+        run: |
+          IMAGE_URI=$AWS_ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO:latest
+          docker buildx build \
+            --platform linux/amd64 \
+            --provenance=false \
+            --sbom=false \
+            --push \
+            -f Dockerfile.lambda \
+            -t $IMAGE_URI .
+
+      - name: Update Lambda
+        run: |
+          IMAGE_URI=$AWS_ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO:latest
+          aws lambda update-function-code \
+            --function-name paperless-renderer \
+            --image-uri $IMAGE_URI \
+            --region $AWS_REGION
+          aws lambda wait function-updated \
+            --function-name paperless-renderer \
+            --region $AWS_REGION
