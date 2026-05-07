@@ -27,95 +27,6 @@ function downloadTextFile(fileName: string, content: string, mimeType: string) {
   URL.revokeObjectURL(url);
 }
 
-function buildPrintWindowHtml(title: string, bodyHtml: string) {
-  return `
-    <!doctype html>
-    <html lang="en">
-      <head>
-        <meta charset="utf-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <title>${title}</title>
-        <style>
-          @page { size: A4; margin: 18mm; }
-          html, body {
-            background: #f5efe6;
-            color: #1d1a16;
-            margin: 0;
-            font-family: Georgia, 'Times New Roman', serif;
-          }
-          .page {
-            max-width: 780px;
-            margin: 0 auto;
-            background: #fffdf8;
-            min-height: 100vh;
-            padding: 24px;
-            box-sizing: border-box;
-          }
-          h1, h2, h3 { line-height: 1.15; }
-          img { max-width: 100%; }
-          table { width: 100%; border-collapse: collapse; }
-          td, th { border: 1px solid #c7bdb0; padding: 8px; }
-        </style>
-      </head>
-      <body>
-        <main class="page">${bodyHtml}</main>
-      </body>
-    </html>
-  `;
-}
-
-function buildPdfPreviewHtml(title: string, bodyHtml: string) {
-  const printHtml = buildPrintWindowHtml(title, bodyHtml);
-  return `
-    <!doctype html>
-    <html lang="en">
-      <head>
-        <meta charset="utf-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <title>${title} - PDF preview</title>
-        <style>
-          html, body {
-            margin: 0;
-            min-height: 100vh;
-            font-family: Arial, Helvetica, sans-serif;
-            background: #f6f4ef;
-            color: #1f1a17;
-          }
-          .frame {
-            padding: 18px;
-            max-width: 980px;
-            margin: 0 auto;
-          }
-          .notice {
-            padding: 12px 14px;
-            margin-bottom: 16px;
-            border: 1px solid #d8d2c8;
-            border-radius: 10px;
-            background: rgba(255, 255, 255, 0.8);
-            font-size: 0.95rem;
-          }
-          .preview {
-            width: 100%;
-            height: calc(100vh - 120px);
-            border: 1px solid #d8d2c8;
-            border-radius: 10px;
-            background: white;
-          }
-          @media print {
-            .notice { display: none; }
-            .preview { display: none; }
-          }
-        </style>
-      </head>
-      <body>
-        <div class="frame">
-          <div class="notice">This preview opens the print dialog automatically. Choose “Save as PDF” in the print sheet.</div>
-          <iframe class="preview" title="${title}" srcdoc='${printHtml.replace(/'/g, "&#39;")}'></iframe>
-        </div>
-      </body>
-    </html>
-  `;
-}
 
 function EditableDocument({
   initialHtml,
@@ -348,25 +259,28 @@ export default function DocumentWorkbench() {
     setMessage('Saved.');
   }
 
-  function handleExportPdf() {
+  async function handleExportPdf() {
     if (status !== 'ready') return;
-    const win = window.open('', '_blank', 'width=1200,height=900');
-    if (!win) {
+    setMessage('Generating PDF…');
+    try {
+      const html2pdf = (await import('html2pdf.js')).default;
+      const el = document.createElement('div');
+      el.innerHTML = htmlDraft;
+      await html2pdf()
+        .set({
+          margin: 18,
+          filename: `${documentTitle}.pdf`,
+          image: { type: 'jpeg', quality: 0.98 },
+          html2canvas: { scale: 2, useCORS: true },
+          jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
+        })
+        .from(el)
+        .save();
+      setMessage('PDF downloaded.');
+    } catch (err: unknown) {
       setStatus('error');
-      setMessage('Popup blocked. Allow popups to export PDF.');
-      return;
+      setMessage(err instanceof Error ? err.message : 'PDF export failed.');
     }
-
-    const previewHtml = buildPdfPreviewHtml(documentTitle, htmlDraft);
-    win.document.open();
-    win.document.write(previewHtml); // eslint-disable-line -- no srcdoc equivalent for popup windows
-    win.document.close();
-    win.focus();
-    win.addEventListener('load', () => {
-      win.focus();
-      win.print();
-    }, { once: true });
-    setMessage('PDF preview opened. Use the print dialog to save as PDF.');
   }
 
   function handleRestoreSample() {
@@ -397,7 +311,7 @@ export default function DocumentWorkbench() {
           <button type="button" className="primary-button" onClick={handleSaveHtml} disabled={status !== 'ready'}>
             Save
           </button>
-          <button type="button" className="primary-button alt" onClick={handleExportPdf} disabled={status !== 'ready'}>
+          <button type="button" className="primary-button alt" onClick={() => { void handleExportPdf(); }} disabled={status !== 'ready'}>
             PDF
           </button>
         </div>
