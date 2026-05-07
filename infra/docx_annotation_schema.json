@@ -1,0 +1,78 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DocxAnnotations",
+  "description": "Layout annotation overlay for a DocxAST. Keyed by block path — does NOT modify the AST.",
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "document_type": {
+      "type": "string",
+      "enum": ["invoice", "letter", "report", "contract", "form", "other"],
+      "description": "Inferred document category — used for renderer heuristics"
+    },
+    "annotations": {
+      "type": "object",
+      "description": "Map of block path → annotation. Key format: 's{section_index}:b{block_index}' (e.g. 's0:b3' = section 0, block 3).",
+      "additionalProperties": {
+        "$ref": "#/definitions/BlockAnnotation"
+      }
+    }
+  },
+  "required": ["version", "annotations"],
+  "additionalProperties": false,
+
+  "definitions": {
+    "SpacingHint": {
+      "type": "string",
+      "enum": ["none", "small", "medium", "large"],
+      "description": "none=0px  small=8px  medium=16px  large=32px"
+    },
+    "BlockAnnotation": {
+      "type": "object",
+      "description": "Presentation hints for a single top-level block. All fields are optional.",
+      "properties": {
+        "heading_weight": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 6,
+          "description": "Override the rendered heading level (h1–h6). Has no effect on tables."
+        },
+        "spacing_before": {
+          "$ref": "#/definitions/SpacingHint",
+          "description": "Extra visual space injected above the block (overrides paragraph native spacing)"
+        },
+        "spacing_after": {
+          "$ref": "#/definitions/SpacingHint",
+          "description": "Extra visual space injected below the block"
+        },
+        "emphasis": {
+          "type": "string",
+          "enum": ["low", "medium", "high"],
+          "description": "Visual prominence. high = blue left-border + tint; medium = grey left-border; low = reduced opacity"
+        },
+        "image_display": {
+          "type": "string",
+          "enum": ["inline", "block", "float-right", "full-width"],
+          "description": "Layout hint for a paragraph that contains an image"
+        },
+        "suppress": {
+          "type": "boolean",
+          "description": "True to de-emphasize this block (e.g. decorative empty paragraphs, repeated spacers)"
+        },
+        "group": {
+          "type": "string",
+          "description": "Logical group name (e.g. 'address-block', 'totals-section', 'document-header')"
+        },
+        "group_role": {
+          "type": "string",
+          "enum": ["header", "label", "value", "separator", "footer"],
+          "description": "Role this block plays within its group"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

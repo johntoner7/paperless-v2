@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Build artifacts
+presign.zip
+*.zip
+
+# Node / Next.js
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+
+# Env files
+.env
+.env.local
+frontend/.env.local
+
+# macOS
+.DS_Store
+
+# Test outputs
+tests/e2e_out/
+diff_vs_libreoffice/

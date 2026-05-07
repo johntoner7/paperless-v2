@@ -1,0 +1,277 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DocxAST",
+  "description": "Canonical intermediate representation of a DOCX document. Version 1.0.",
+  "definitions": {
+    "RunStyle": {
+      "type": "object",
+      "description": "Inline character formatting extracted from w:rPr",
+      "properties": {
+        "bold":           { "type": "boolean" },
+        "italic":         { "type": "boolean" },
+        "underline":      { "type": "boolean" },
+        "strike":         { "type": "boolean" },
+        "font_size_pt":   { "type": "number", "description": "Font size in points (w:sz / 2)" },
+        "font_family":    { "type": "string" },
+        "color":          { "type": "string", "description": "Hex color string, e.g. 'FF0000'" },
+        "vertical_align": { "type": "string", "enum": ["superscript", "subscript"] }
+      },
+      "additionalProperties": false
+    },
+    "ParagraphStyle": {
+      "type": "object",
+      "description": "Block-level formatting extracted from w:pPr",
+      "properties": {
+        "style_id":   { "type": "string", "description": "w:pStyle val, e.g. 'Heading1'" },
+        "style_name": { "type": "string", "description": "Human-readable style name from styles.xml" },
+        "alignment":  { "type": "string", "description": "w:jc val: left, right, center, both, distribute" },
+        "spacing": {
+          "type": "object",
+          "properties": {
+            "before": { "type": "string", "description": "w:spacing w:before (twentieths of a point)" },
+            "after":  { "type": "string", "description": "w:spacing w:after (twentieths of a point)" },
+            "line":   { "type": "string", "description": "w:spacing w:line (twentieths of a point)" }
+          },
+          "additionalProperties": false
+        },
+        "indent": {
+          "type": "object",
+          "properties": {
+            "left":      { "type": "string", "description": "Twips" },
+            "right":     { "type": "string", "description": "Twips" },
+            "firstLine": { "type": "string", "description": "Twips, positive = first-line indent" },
+            "hanging":   { "type": "string", "description": "Twips, hanging indent" }
+          },
+          "additionalProperties": false
+        },
+        "num_id": { "type": "string", "description": "w:numId val — identifies the list definition" },
+        "ilvl":   { "type": "integer", "description": "w:ilvl val — list nesting level (0-based)" }
+      },
+      "additionalProperties": false
+    },
+    "CellStyle": {
+      "type": "object",
+      "description": "Cell-level formatting extracted from w:tcPr",
+      "properties": {
+        "vertical_align": { "type": "string", "description": "w:vAlign val: top, center, bottom" },
+        "alignment":      { "type": "string", "description": "Horizontal alignment (from cell or first paragraph)" }
+      },
+      "additionalProperties": false
+    },
+    "TextNode": {
+      "type": "object",
+      "description": "A text segment from w:t",
+      "properties": {
+        "type":            { "type": "string", "const": "text" },
+        "text":            { "type": "string" },
+        "preserve_spaces": { "type": "boolean", "description": "True when xml:space='preserve'" }
+      },
+      "required": ["type", "text"],
+      "additionalProperties": false
+    },
+    "BreakNode": {
+      "type": "object",
+      "description": "A line break (w:br, w:cr) or tab (w:tab)",
+      "properties": {
+        "type":       { "type": "string", "const": "break" },
+        "break_type": { "type": "string", "enum": ["line", "tab"] }
+      },
+      "required": ["type", "break_type"],
+      "additionalProperties": false
+    },
+    "ImagePositioning": {
+      "type": "object",
+      "description": "DrawingML anchor or inline positioning info",
+      "properties": {
+        "kind":             { "type": "string", "enum": ["inline", "anchor"] },
+        "relative_from_h":  { "type": "string" },
+        "relative_from_v":  { "type": "string" },
+        "offset_h_emu":     { "type": "integer", "description": "Horizontal offset in EMUs (1 inch = 914400 EMU)" },
+        "offset_v_emu":     { "type": "integer", "description": "Vertical offset in EMUs" }
+      },
+      "required": ["kind"],
+      "additionalProperties": false
+    },
+    "ImageNode": {
+      "type": "object",
+      "description": "An embedded image from w:drawing (DrawingML or VML)",
+      "properties": {
+        "type":        { "type": "string", "const": "image" },
+        "rel_id":      { "type": "string", "description": "Relationship ID (rId)" },
+        "media_path":  { "type": ["string", "null"], "description": "Resolved archive path, e.g. word/media/image1.png" },
+        "data_uri":    { "type": ["string", "null"], "description": "Base64 data URI of image bytes" },
+        "mime_type":   { "type": ["string", "null"] },
+        "width_px":    { "type": ["integer", "null"], "description": "Rendered width in px (converted from EMU at 96dpi)" },
+        "height_px":   { "type": ["integer", "null"] },
+        "positioning": { "oneOf": [{ "$ref": "#/definitions/ImagePositioning" }, { "type": "null" }] }
+      },
+      "required": ["type", "rel_id"],
+      "additionalProperties": false
+    },
+    "RunNode": {
+      "type": "object",
+      "description": "A w:r run — a span of inline content sharing the same character style",
+      "properties": {
+        "type":     { "type": "string", "const": "run" },
+        "style":    { "$ref": "#/definitions/RunStyle" },
+        "children": {
+          "type": "array",
+          "description": "Ordered run content: text, breaks, images",
+          "items": {
+            "oneOf": [
+              { "$ref": "#/definitions/TextNode" },
+              { "$ref": "#/definitions/BreakNode" },
+              { "$ref": "#/definitions/ImageNode" }
+            ]
+          }
+        }
+      },
+      "required": ["type", "style", "children"],
+      "additionalProperties": false
+    },
+    "HyperlinkNode": {
+      "type": "object",
+      "description": "A w:hyperlink wrapping one or more runs",
+      "properties": {
+        "type":     { "type": "string", "const": "hyperlink" },
+        "href":     { "type": ["string", "null"], "description": "Resolved URL from relationships" },
+        "children": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/RunNode" }
+        }
+      },
+      "required": ["type", "children"],
+      "additionalProperties": false
+    },
+    "ParagraphNode": {
+      "type": "object",
+      "description": "A w:p paragraph block — may be empty (spacer)",
+      "properties": {
+        "type":     { "type": "string", "const": "paragraph" },
+        "style":    { "$ref": "#/definitions/ParagraphStyle" },
+        "children": {
+          "type": "array",
+          "description": "Ordered inline elements",
+          "items": {
+            "oneOf": [
+              { "$ref": "#/definitions/RunNode" },
+              { "$ref": "#/definitions/HyperlinkNode" }
+            ]
+          }
+        }
+      },
+      "required": ["type", "style", "children"],
+      "additionalProperties": false
+    },
+    "TableCellNode": {
+      "type": "object",
+      "properties": {
+        "colspan":      { "type": "integer", "minimum": 1 },
+        "rowspan":      { "type": "integer", "minimum": 1 },
+        "vmerge":       { "type": "string", "enum": ["", "restart", "continue"], "description": "Raw vmerge state; 'continue' cells are omitted from rows[]" },
+        "width_twips":  { "type": ["integer", "null"], "description": "Cell width in twips from w:tcW" },
+        "style":        { "$ref": "#/definitions/CellStyle" },
+        "children": {
+          "type": "array",
+          "description": "Ordered block content inside the cell (paragraphs and nested tables)",
+          "items": { "$ref": "#/definitions/Block" }
+        }
+      },
+      "required": ["colspan", "rowspan", "vmerge", "children"],
+      "additionalProperties": false
+    },
+    "TableRowNode": {
+      "type": "object",
+      "properties": {
+        "cells": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/TableCellNode" },
+          "description": "Only non-skipped cells (vmerge continue cells are absorbed into rowspan)"
+        }
+      },
+      "required": ["cells"],
+      "additionalProperties": false
+    },
+    "TableNode": {
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "const": "table" },
+        "column_widths_twips": {
+          "type": "array",
+          "items": { "type": ["integer", "null"] },
+          "description": "Per-column widths from w:tblGrid (null when not specified)"
+        },
+        "rows": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/TableRowNode" }
+        }
+      },
+      "required": ["type", "column_widths_twips", "rows"],
+      "additionalProperties": false
+    },
+    "Block": {
+      "oneOf": [
+        { "$ref": "#/definitions/ParagraphNode" },
+        { "$ref": "#/definitions/TableNode" }
+      ]
+    },
+    "DocumentSection": {
+      "type": "object",
+      "description": "A contiguous region of the document: header, body, or footer",
+      "properties": {
+        "kind": { "type": "string", "enum": ["header", "body", "footer"] },
+        "blocks": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/Block" }
+        }
+      },
+      "required": ["kind", "blocks"],
+      "additionalProperties": false
+    },
+    "Relationship": {
+      "type": "object",
+      "properties": {
+        "type":   { "type": "string" },
+        "target": { "type": "string" }
+      },
+      "required": ["type", "target"],
+      "additionalProperties": false
+    },
+    "ImageEntry": {
+      "type": "object",
+      "description": "All media files embedded in the DOCX, keyed by archive path",
+      "properties": {
+        "media_path": { "type": "string" },
+        "mime_type":  { "type": "string" },
+        "data_uri":   { "type": "string" }
+      },
+      "required": ["media_path", "mime_type", "data_uri"],
+      "additionalProperties": false
+    }
+  },
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "string",
+      "description": "AST schema version",
+      "const": "1.0"
+    },
+    "sections": {
+      "type": "array",
+      "description": "Document sections in order: headers first, body, footers last",
+      "items": { "$ref": "#/definitions/DocumentSection" }
+    },
+    "relationships": {
+      "type": "object",
+      "description": "Flat map of rId → relationship metadata from word/_rels/document.xml.rels",
+      "additionalProperties": { "$ref": "#/definitions/Relationship" }
+    },
+    "images": {
+      "type": "object",
+      "description": "All embedded media files keyed by archive path (e.g. word/media/image1.png)",
+      "additionalProperties": { "$ref": "#/definitions/ImageEntry" }
+    }
+  },
+  "required": ["version", "sections", "relationships", "images"],
+  "additionalProperties": false
+}

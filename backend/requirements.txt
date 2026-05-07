@@ -1,0 +1,2 @@
+weasyprint
+anthropic>=0.97.0
