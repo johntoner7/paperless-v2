@@ -397,8 +397,34 @@ def _build_table(
     media: dict,
 ) -> dict:
     column_widths = _parse_column_widths(table)
+    tbl_borders = _extract_tbl_borders(table)
     rows = _build_table_rows(table, styles, relationships, media)
-    return {"type": "table", "column_widths_twips": column_widths, "rows": rows}
+    return {"type": "table", "column_widths_twips": column_widths, "tbl_borders": tbl_borders, "rows": rows}
+
+
+def _extract_tbl_borders(table: ET.Element) -> dict:
+    tbl_pr = table.find(f"{W_NS}tblPr")
+    if tbl_pr is None:
+        return {}
+    borders_elem = tbl_pr.find(f"{W_NS}tblBorders")
+    if borders_elem is None:
+        return {}
+    result: dict = {}
+    for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
+        b = borders_elem.find(f"{W_NS}{edge}")
+        if b is None:
+            continue
+        val = b.get(f"{W_NS}val") or b.get("val", "")
+        if val in ("none", "nil", ""):
+            continue
+        sz = b.get(f"{W_NS}sz") or b.get("sz")
+        color = b.get(f"{W_NS}color") or b.get("color", "auto")
+        result[edge] = {
+            "style": "double" if val == "double" else "solid",
+            "width_pt": round(int(sz) / 8, 2) if sz else 0.5,
+            "color": color.upper() if color and color.upper() != "AUTO" else "000000",
+        }
+    return result
 
 
 def _parse_column_widths(table: ET.Element) -> list:

@@ -143,9 +143,10 @@ def lambda_handler(event, context):
             if not object_exists(BUCKET, out_key):
                 return make_response(404, {'status': 'pending'})
 
-            # object exists - return presigned GET
+            # object exists - return presigned GET for both converted HTML and original upload
             get_url = s3.generate_presigned_url('get_object', Params={'Bucket': BUCKET, 'Key': out_key}, ExpiresIn=URL_EXPIRATION)
-            return make_response(200, {'status': 'ready', 'resultUrl': get_url, 'key': out_key})
+            original_url = s3.generate_presigned_url('get_object', Params={'Bucket': BUCKET, 'Key': key}, ExpiresIn=URL_EXPIRATION)
+            return make_response(200, {'status': 'ready', 'resultUrl': get_url, 'originalUrl': original_url, 'key': out_key})
 
         else:
             return make_response(405, {'error': 'method not allowed'})

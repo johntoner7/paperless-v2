@@ -345,8 +345,9 @@ def _render_table(node: dict, ann: Optional[dict] = None) -> str:
     table_style = "width: 100%; border-collapse: collapse; table-layout: auto;"
     if ann_css:
         table_style += " " + ann_css
+    tbl_borders = node.get("tbl_borders") or {}
     colgroup = _render_colgroup(node.get("column_widths_twips", []))
-    rows = "".join(_render_row(r) for r in node.get("rows", []))
+    rows = "".join(_render_row(r, tbl_borders) for r in node.get("rows", []))
     return f'<table style="{table_style}">{colgroup}{rows}</table>'
 
 
@@ -367,11 +368,11 @@ def _render_colgroup(widths: list) -> str:
     return f"<colgroup>{''.join(cols)}</colgroup>"
 
 
-def _render_row(row: dict) -> str:
-    return "<tr>" + "".join(_render_cell(c) for c in row.get("cells", [])) + "</tr>"
+def _render_row(row: dict, tbl_borders: dict) -> str:
+    return "<tr>" + "".join(_render_cell(c, tbl_borders) for c in row.get("cells", [])) + "</tr>"
 
 
-def _render_cell(cell: dict) -> str:
+def _render_cell(cell: dict, tbl_borders: Optional[dict] = None) -> str:
     attrs: list[str] = []
     if cell.get("colspan", 1) > 1:
         attrs.append(f'colspan="{cell["colspan"]}"')
@@ -379,7 +380,7 @@ def _render_cell(cell: dict) -> str:
         attrs.append(f'rowspan="{cell["rowspan"]}"')
 
     # 3.2 — cell alignment CSS
-    css = _cell_css(cell.get("style", {}))
+    css = _cell_css(cell.get("style", {}), tbl_borders or {})
     if css:
         attrs.append(f'style="{css}"')
 
@@ -388,7 +389,7 @@ def _render_cell(cell: dict) -> str:
     return f"<td{attr_str}>{inner}</td>"
 
 
-def _cell_css(style: dict) -> str:
+def _cell_css(style: dict, tbl_borders: Optional[dict] = None) -> str:
     parts: list[str] = ["padding: 4pt", "vertical-align: top"]
 
     va = style.get("vertical_align")
@@ -405,9 +406,13 @@ def _cell_css(style: dict) -> str:
     if bg:
         parts.append(f"background-color: #{bg}")
 
-    borders = style.get("borders") or {}
+    # Cell-level borders take priority; fall back to table-level borders for each edge.
+    # insideH covers top/bottom (inner horizontal borders), insideV covers left/right.
+    cell_borders = style.get("borders") or {}
+    tbl_borders = tbl_borders or {}
+    _TBL_EDGE = {"top": "insideH", "bottom": "insideH", "left": "insideV", "right": "insideV"}
     for edge in ("top", "left", "bottom", "right"):
-        b = borders.get(edge)
+        b = cell_borders.get(edge) or tbl_borders.get(_TBL_EDGE[edge])
         if b:
             parts.append(
                 f"border-{edge}: {b['width_pt']}pt {b['style']} #{b['color']}"

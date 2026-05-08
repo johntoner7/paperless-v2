@@ -1,9 +1,16 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  FileText, Upload, Wand2, RefreshCw, SplitSquareHorizontal, X,
+  Download, Save, BookOpen, ChevronDown,
+} from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
+import { Separator } from '@/components/ui/separator';
+import { cn } from '@/lib/utils';
 
 type ConversionState = 'idle' | 'converting' | 'ready' | 'error';
-
 type LibraryUpload = {
   key: string;
   fileName: string;
@@ -11,360 +18,428 @@ type LibraryUpload = {
   status: 'ready' | 'pending';
 };
 
-function stripExtension(fileName: string) {
-  return fileName.replace(/\.[^.]+$/, '');
+function stripExtension(name: string) {
+  return name.replace(/\.[^.]+$/, '');
 }
 
-function downloadTextFile(fileName: string, content: string, mimeType: string) {
-  const blob = new Blob([content], { type: mimeType });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = fileName;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
+function downloadBlob(fileName: string, content: string, mime: string) {
+  const a = Object.assign(document.createElement('a'), {
+    href: URL.createObjectURL(new Blob([content], { type: mime })),
+    download: fileName,
+  });
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
 }
 
-
-function EditableDocument({
-  initialHtml,
-  onChange,
-  documentTitle,
-}: {
-  initialHtml: string;
-  onChange: (html: string) => void;
-  documentTitle: string;
-}) {
-  const editorRef = useRef<HTMLDivElement | null>(null);
+/* ── DOCX preview pane ── */
+function DocxPane({ url }: { url: string }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (editorRef.current && editorRef.current.innerHTML !== initialHtml) {
-      editorRef.current.innerHTML = initialHtml;
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+
+    (async () => {
+      if (!ref.current) return;
+      try {
+        const { renderAsync } = await import('docx-preview');
+        const buf = await fetch(url).then(r => {
+          if (!r.ok) throw new Error(`Fetch failed: ${r.status}`);
+          return r.arrayBuffer();
+        });
+        if (cancelled || !ref.current) return;
+        ref.current.innerHTML = '';
+        await renderAsync(buf, ref.current, undefined, {
+          inWrapper: true,
+          ignoreWidth: false,
+          ignoreFonts: false,
+          breakPages: true,
+          useBase64URL: true,
+        });
+      } catch (e) {
+        if (!cancelled) setError(e instanceof Error ? e.message : 'Render failed');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [url]);
+
+  return (
+    <div className="h-full overflow-y-auto bg-[#f0f0f0] p-4">
+      {loading && (
+        <div className="flex items-center justify-center h-40 text-sm text-muted-foreground">
+          Rendering original document…
+        </div>
+      )}
+      {error && <div className="text-sm text-red-500 p-4">{error}</div>}
+      <div ref={ref} className="docx-wrapper" />
+    </div>
+  );
+}
+
+/* ── HTML editor ────────────────────────────── */
+function HtmlEditor({ initialHtml, onChange }: { initialHtml: string; onChange: (h: string) => void }) {
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (ref.current && ref.current.innerHTML !== initialHtml) {
+      ref.current.innerHTML = initialHtml;
     }
   }, [initialHtml]);
 
   return (
-    <article className="editor-card">
-      <div className="editor-header">
-        <h2>{documentTitle}</h2>
-      </div>
-      <div
-        ref={editorRef}
-        className="editor-body"
-        contentEditable
-        suppressContentEditableWarning
-        onInput={() => {
-          if (editorRef.current) {
-            onChange(editorRef.current.innerHTML);
-          }
-        }}
-      />
-    </article>
+    <div
+      ref={ref}
+      className="editor-prose"
+      contentEditable
+      suppressContentEditableWarning
+      onInput={() => ref.current && onChange(ref.current.innerHTML)}
+    />
   );
 }
 
+/* ── Main workbench ─────────────────────────── */
 export default function DocumentWorkbench() {
-  const PRESIGN_URL = process.env.NEXT_PUBLIC_PRESIGN_URL || '';
+  const PRESIGN_URL = process.env.NEXT_PUBLIC_PRESIGN_URL ?? '';
+
   const [status, setStatus] = useState<ConversionState>('idle');
-  const [message, setMessage] = useState('Upload a .docx file.');
+  const [message, setMessage] = useState('');
   const [sourceFile, setSourceFile] = useState<File | null>(null);
-  const [documentTitle, setDocumentTitle] = useState('Untitled document');
-  const [htmlDraft, setHtmlDraft] = useState('<p>Your converted HTML will appear here.</p>');
+  const [docTitle, setDocTitle] = useState('');
+  const [htmlDraft, setHtmlDraft] = useState('');
   const [savedAt, setSavedAt] = useState<string | null>(null);
-  const [libraryUploads, setLibraryUploads] = useState<LibraryUpload[]>([]);
-  const [selectedLibraryKey, setSelectedLibraryKey] = useState('');
-  const skipDraftRestoreRef = useRef(false);
+  const [library, setLibrary] = useState<LibraryUpload[]>([]);
+  const [selectedKey, setSelectedKey] = useState('');
+  const [docxSource, setDocxSource] = useState<string | null>(null);
+  const [showCompare, setShowCompare] = useState(false);
+  const [libraryOpen, setLibraryOpen] = useState(false);
+  const skipRestoreRef = useRef(false);
 
-  const draftStorageKey = useMemo(
-    () => `paperless-be:draft:${documentTitle}`,
-    [documentTitle],
-  );
+  const draftKey = useMemo(() => `pb:draft:${docTitle}`, [docTitle]);
 
+  /* draft restore */
   useEffect(() => {
-    if (skipDraftRestoreRef.current) {
-      skipDraftRestoreRef.current = false;
-      return;
-    }
+    if (skipRestoreRef.current) { skipRestoreRef.current = false; return; }
+    if (!docTitle) return;
+    const saved = localStorage.getItem(draftKey);
+    if (saved) { setHtmlDraft(saved); setStatus('ready'); setMessage('Draft restored.'); }
+  }, [draftKey, docTitle]);
 
-    const savedDraft = window.localStorage.getItem(draftStorageKey);
-    if (savedDraft) {
-      setHtmlDraft(savedDraft);
-      setStatus('ready');
-      setMessage('Draft restored.');
-    }
-  }, [draftStorageKey]);
-
-  async function refreshLibraryUploads() {
+  /* library */
+  async function fetchLibrary() {
     if (!PRESIGN_URL) return;
-
-    const url = `${PRESIGN_URL}?action=list`;
-    const res = await fetch(url, { method: 'GET' });
-    if (!res.ok) throw new Error(`Failed to load uploaded files: ${res.status}`);
-
-    const payload = await res.json() as { items?: LibraryUpload[] };
-    setLibraryUploads(payload.items || []);
+    const r = await fetch(`${PRESIGN_URL}?action=list`);
+    if (!r.ok) return;
+    const d = await r.json() as { items?: LibraryUpload[] };
+    setLibrary(d.items ?? []);
   }
+  useEffect(() => { void fetchLibrary().catch(console.error); }, [PRESIGN_URL]);
 
-  useEffect(() => {
-    void refreshLibraryUploads().catch((err: unknown) => {
-      console.error(err);
-    });
-  }, [PRESIGN_URL]);
-
-  async function requestPresign(fileName: string, contentType: string) {
-    if (!PRESIGN_URL) throw new Error('Presign endpoint not configured (NEXT_PUBLIC_PRESIGN_URL)');
-    const res = await fetch(PRESIGN_URL, {
+  /* presign helpers */
+  async function presign(fileName: string, contentType: string) {
+    const r = await fetch(PRESIGN_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ fileName, contentType }),
     });
-    if (!res.ok) throw new Error(`Presign request failed: ${res.status}`);
-    return res.json(); // { uploadUrl, key }
+    if (!r.ok) throw new Error(`Presign failed: ${r.status}`);
+    return r.json() as Promise<{ uploadUrl: string; key: string }>;
   }
 
-  async function checkResult(key: string) {
-    if (!PRESIGN_URL) throw new Error('Presign endpoint not configured (NEXT_PUBLIC_PRESIGN_URL)');
-    const url = `${PRESIGN_URL}?key=${encodeURIComponent(key)}`;
-    const res = await fetch(url, { method: 'GET' });
-    if (res.status === 404) return null;
-    if (!res.ok) throw new Error(`Status check failed: ${res.status}`);
-    return res.json(); // { status: 'ready', resultUrl }
+  async function pollResult(key: string) {
+    const r = await fetch(`${PRESIGN_URL}?key=${encodeURIComponent(key)}`);
+    if (r.status === 404) return null;
+    if (!r.ok) throw new Error(`Poll failed: ${r.status}`);
+    return r.json() as Promise<{ status: string; resultUrl: string; originalUrl?: string; key: string }>;
   }
 
-  async function loadLibraryUpload(key: string) {
-    setSelectedLibraryKey(key);
-
-    const entry = libraryUploads.find((item) => item.key === key);
-    if (!entry) {
-      setMessage('Selected file is no longer available.');
-      return;
-    }
-
-    if (entry.status !== 'ready') {
-      setMessage(`${entry.fileName} is uploaded, but converted HTML is not ready yet.`);
-      return;
-    }
-
-    setStatus('converting');
-    setMessage(`Loading ${entry.fileName}...`);
-
-    try {
-      const result = await checkResult(entry.key);
-      if (!result || result.status !== 'ready' || !result.resultUrl) {
-        setStatus('idle');
-        setMessage(`${entry.fileName} has no converted HTML yet.`);
-        return;
-      }
-
-      const htmlRes = await fetch(result.resultUrl);
-      if (!htmlRes.ok) throw new Error(`Failed to fetch result: ${htmlRes.status}`);
-
-      const html = await htmlRes.text();
-      const nextTitle = stripExtension(entry.fileName);
-      skipDraftRestoreRef.current = true;
-      setDocumentTitle(nextTitle);
-      setSourceFile(null);
-      setHtmlDraft(html);
-      setStatus('ready');
-      setMessage(`Loaded ${entry.fileName}.`);
-      setSavedAt(null);
-      window.localStorage.setItem(`paperless-be:draft:${nextTitle}`, html);
-    } catch (err: unknown) {
-      console.error(err);
-      setStatus('error');
-      setMessage(err instanceof Error ? err.message : String(err));
-    }
-  }
-
+  /* convert */
   async function handleConvert() {
-    if (!sourceFile) {
-      setMessage('No source file selected.');
-      return;
-    }
-
-    setStatus('converting');
-    setMessage('Requesting upload URL...');
-
+    if (!sourceFile) return;
+    setStatus('converting'); setMessage('Uploading…');
     try {
-      const { uploadUrl, key } = await requestPresign(
+      const { uploadUrl, key } = await presign(
         sourceFile.name,
         sourceFile.type || 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
       );
-
-      setMessage('Uploading...');
-      const putRes = await fetch(uploadUrl, {
-        method: 'PUT',
-        body: sourceFile,
+      const up = await fetch(uploadUrl, {
+        method: 'PUT', body: sourceFile,
         headers: { 'Content-Type': sourceFile.type || 'application/octet-stream' },
       });
-      if (!putRes.ok) throw new Error(`Upload failed: ${putRes.status}`);
-
-      setMessage('Waiting for conversion...');
-
-      const maxAttempts = 60;
-      const intervalMs = 2000;
-      for (let attempt = 0; attempt < maxAttempts; attempt++) {
-        const res = await checkResult(key);
-        if (res && res.status === 'ready' && res.resultUrl) {
-          const htmlRes = await fetch(res.resultUrl);
-          if (!htmlRes.ok) throw new Error(`Failed to fetch result: ${htmlRes.status}`);
-          const html = await htmlRes.text();
-          const nextTitle = stripExtension(sourceFile.name);
-          const storageKey = `paperless-be:draft:${nextTitle}`;
-          setDocumentTitle(nextTitle);
-          setHtmlDraft(html);
-          setStatus('ready');
-          setMessage('Conversion complete.');
+      if (!up.ok) throw new Error(`Upload failed: ${up.status}`);
+      setMessage('Converting…');
+      for (let i = 0; i < 60; i++) {
+        const result = await pollResult(key);
+        if (result?.status === 'ready' && result.resultUrl) {
+          const html = await fetch(result.resultUrl).then(r => r.text());
+          const title = stripExtension(sourceFile.name);
+          skipRestoreRef.current = true;
+          setDocTitle(title); setHtmlDraft(html);
+          setDocxSource(result.originalUrl ?? null); setShowCompare(false);
+          setStatus('ready'); setMessage('Conversion complete.');
           setSavedAt(null);
-          window.localStorage.setItem(storageKey, html);
-          void refreshLibraryUploads().catch((refreshErr: unknown) => {
-            console.error(refreshErr);
-          });
+          localStorage.setItem(`pb:draft:${title}`, html);
+          void fetchLibrary().catch(console.error);
           return;
         }
-        await new Promise((r) => setTimeout(r, intervalMs));
+        await new Promise(r => setTimeout(r, 2000));
       }
-
-      setStatus('error');
-      setMessage('Timed out waiting for conversion.');
-    } catch (err: unknown) {
-      console.error(err);
-      setStatus('error');
-      setMessage(err instanceof Error ? err.message : String(err));
+      throw new Error('Timed out waiting for conversion.');
+    } catch (e) {
+      setStatus('error'); setMessage(e instanceof Error ? e.message : String(e));
     }
   }
 
-  function handleFileUpload(event: React.ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    if (!file.name.toLowerCase().endsWith('.docx')) {
-      setStatus('error');
-      setMessage('Please upload a .docx file.');
-      return;
+  /* load from library */
+  async function loadDoc(key: string) {
+    const entry = library.find(i => i.key === key);
+    if (!entry || entry.status !== 'ready') {
+      setMessage(`${entry?.fileName ?? key} is still processing.`); return;
     }
-    setSourceFile(file);
-    setStatus('idle');
-    setMessage(`${file.name} selected. Click Convert to process.`);
+    setStatus('converting'); setMessage(`Loading ${entry.fileName}…`);
+    try {
+      const result = await pollResult(key);
+      if (!result?.resultUrl) { setStatus('idle'); setMessage('No HTML yet.'); return; }
+      const html = await fetch(result.resultUrl).then(r => r.text());
+      const title = stripExtension(entry.fileName);
+      skipRestoreRef.current = true;
+      setDocTitle(title); setSourceFile(null); setHtmlDraft(html);
+      setDocxSource(result.originalUrl ?? null); setShowCompare(false);
+      setSelectedKey(key); setStatus('ready'); setMessage(`Opened ${entry.fileName}`);
+      setSavedAt(null);
+      localStorage.setItem(`pb:draft:${title}`, html);
+    } catch (e) {
+      setStatus('error'); setMessage(e instanceof Error ? e.message : String(e));
+    }
   }
 
-  function handleSaveHtml() {
+  function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    if (!f.name.toLowerCase().endsWith('.docx')) {
+      setStatus('error'); setMessage('Only .docx files are supported.'); return;
+    }
+    setSourceFile(f); setStatus('idle'); setMessage('');
+  }
+
+  async function handleSave() {
     if (status !== 'ready') return;
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const fileName = `${documentTitle || 'document'}-edited-${timestamp}.html`;
-    downloadTextFile(fileName, htmlDraft, 'text/html;charset=utf-8');
-    window.localStorage.setItem(draftStorageKey, htmlDraft);
-    setSavedAt(new Date().toLocaleString());
-    setMessage('Saved.');
+    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    downloadBlob(`${docTitle || 'document'}-${ts}.html`, htmlDraft, 'text/html;charset=utf-8');
+    localStorage.setItem(draftKey, htmlDraft);
+    setSavedAt(new Date().toLocaleTimeString()); setMessage('Saved.');
   }
 
-  async function handleExportPdf() {
+  async function handlePdf() {
     if (status !== 'ready') return;
     setMessage('Generating PDF…');
     try {
-      const html2pdf = (await import('html2pdf.js')).default;
-      const el = document.createElement('div');
-      el.innerHTML = htmlDraft;
-      await html2pdf()
-        .set({
-          margin: 18,
-          filename: `${documentTitle}.pdf`,
-          image: { type: 'jpeg', quality: 0.98 },
-          html2canvas: { scale: 2, useCORS: true },
-          jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
-        })
-        .from(el)
-        .save();
+      const h2p = (await import('html2pdf.js')).default;
+      const el = Object.assign(document.createElement('div'), { innerHTML: htmlDraft });
+      await h2p().set({
+        margin: 18, filename: `${docTitle}.pdf`,
+        image: { type: 'jpeg', quality: 0.98 },
+        html2canvas: { scale: 2, useCORS: true },
+        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
+      }).from(el).save();
       setMessage('PDF downloaded.');
-    } catch (err: unknown) {
-      setStatus('error');
-      setMessage(err instanceof Error ? err.message : 'PDF export failed.');
+    } catch (e) {
+      setStatus('error'); setMessage(e instanceof Error ? e.message : 'PDF failed.');
     }
   }
 
-  function handleRestoreSample() {
-    const sample = '<h1>Sample document</h1><p>Edit this text.</p>';
-    setStatus('ready');
-    setMessage('Sample loaded.');
-    skipDraftRestoreRef.current = true;
-    setDocumentTitle('sample-document');
-    setHtmlDraft(sample);
-    setSourceFile(null);
-    setSavedAt(null);
-  }
+  const isReady = status === 'ready';
+  const canCompare = isReady && docxSource !== null;
+
+  /* ── status badge ── */
+  const statusBadge = {
+    idle: null,
+    converting: <Badge variant="warning" className="animate-pulse">Converting…</Badge>,
+    ready: message ? <span className="text-xs text-muted-foreground">{message}</span> : null,
+    error: <Badge variant="destructive">{message}</Badge>,
+  }[status];
 
   return (
-    <main className="shell">
-      <section className="toolbar">
-        <div className="toolbar-row">
-          <label className="upload-button" htmlFor="docx-upload">
-            <span>{sourceFile ? sourceFile.name : 'Upload DOCX'}</span>
-          </label>
-          <input id="docx-upload" type="file" accept=".docx" onChange={handleFileUpload} />
-          <button type="button" className="secondary-button" onClick={handleConvert} disabled={!sourceFile || status === 'converting'}>
-            Convert
-          </button>
-          <button type="button" className="secondary-button" onClick={handleRestoreSample}>
-            Sample
-          </button>
-          <button type="button" className="primary-button" onClick={handleSaveHtml} disabled={status !== 'ready'}>
-            Save
-          </button>
-          <button type="button" className="primary-button alt" onClick={() => { void handleExportPdf(); }} disabled={status !== 'ready'}>
-            PDF
-          </button>
+    <div className="flex flex-col h-screen bg-background">
+
+      {/* ── Top nav ── */}
+      <header className="flex items-center gap-3 px-4 h-14 border-b bg-white shrink-0">
+        <div className="flex items-center gap-2 text-sm font-semibold">
+          <FileText className="h-4 w-4 text-muted-foreground" />
+          Paperless
         </div>
 
-        <div className="toolbar-row toolbar-row-picker">
-          <label className="picker-label" htmlFor="uploaded-pdf-picker">
-            Previously uploaded documents
-          </label>
-          <select
-            id="uploaded-pdf-picker"
-            className="picker-select"
-            value={selectedLibraryKey}
-            onChange={(event) => {
-              void loadLibraryUpload(event.target.value);
-            }}
-            disabled={libraryUploads.length === 0}
-          >
-            <option value="">{libraryUploads.length ? 'Choose a document' : 'No uploaded documents found'}</option>
-            {libraryUploads.map((item) => (
-              <option key={item.key} value={item.key}>
-                {item.fileName}{item.status !== 'ready' ? ' (processing)' : ''}
-              </option>
-            ))}
-          </select>
+        <Separator orientation="vertical" className="h-5 hidden sm:block" />
+
+        {docTitle
+          ? <span className="text-sm text-muted-foreground truncate max-w-[120px] sm:max-w-xs hidden sm:block">{docTitle}</span>
+          : <span className="text-sm text-muted-foreground/50 italic hidden sm:block">No document open</span>
+        }
+
+        <div className="ml-auto flex items-center gap-2">
+          {statusBadge}
+          {savedAt && <span className="text-xs text-muted-foreground hidden sm:block">Saved {savedAt}</span>}
+          <Button variant="outline" size="sm" className="border-sky-200 text-sky-700 hover:bg-sky-50" onClick={() => void handleSave()} disabled={!isReady}>
+            <Save className="h-3.5 w-3.5" />
+            <span className="hidden sm:inline">Save HTML</span>
+          </Button>
+          <Button size="sm" className="bg-sky-500 hover:bg-sky-600 text-white border-0" onClick={() => void handlePdf()} disabled={!isReady}>
+            <Download className="h-3.5 w-3.5" />
+            <span className="hidden sm:inline">PDF</span>
+          </Button>
+        </div>
+      </header>
+
+      {/* ── Toolbar ── */}
+      <div className="flex items-center gap-2 px-4 py-2.5 border-b bg-white shrink-0 flex-wrap">
+        {/* file pick + convert */}
+        <label
+          htmlFor="docx-upload"
+          className={cn(
+            'inline-flex items-center gap-1.5 h-8 px-3 rounded-md border text-sm cursor-pointer transition-colors',
+            sourceFile
+              ? 'border-primary/30 bg-primary/5 text-primary font-medium'
+              : 'border-input bg-background text-muted-foreground hover:bg-accent',
+          )}
+        >
+          <Upload className="h-3.5 w-3.5" />
+          <span className="max-w-[160px] truncate">{sourceFile ? sourceFile.name : 'Choose DOCX'}</span>
+        </label>
+        <input id="docx-upload" type="file" accept=".docx" className="sr-only" onChange={handleFileChange} />
+
+        <Button
+          size="sm"
+          className="bg-sky-500 hover:bg-sky-600 text-white border-0"
+          onClick={() => void handleConvert()}
+          disabled={!sourceFile || status === 'converting'}
+        >
+          <Wand2 className="h-3.5 w-3.5" />
+          Convert
+        </Button>
+
+        <Separator orientation="vertical" className="h-5 mx-1 hidden sm:block" />
+
+        {/* library picker */}
+        <div className="relative">
           <button
-            type="button"
-            className="secondary-button"
-            onClick={() => {
-              void refreshLibraryUploads().catch((err: unknown) => {
-                console.error(err);
-              });
-            }}
+            className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md border border-input bg-background text-sm text-muted-foreground hover:bg-accent transition-colors"
+            onClick={() => setLibraryOpen(v => !v)}
           >
-            Refresh
+            <BookOpen className="h-3.5 w-3.5" />
+            {selectedKey
+              ? (library.find(i => i.key === selectedKey)?.fileName ?? 'Library')
+              : 'Library'}
+            <ChevronDown className="h-3 w-3 opacity-50" />
           </button>
+          {libraryOpen && (
+            <div className="absolute top-full left-0 mt-1 z-50 min-w-[260px] rounded-md border bg-white shadow-lg py-1">
+              {library.length === 0 && (
+                <p className="px-3 py-2 text-sm text-muted-foreground">No documents yet.</p>
+              )}
+              {library.map(item => (
+                <button
+                  key={item.key}
+                  className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-accent text-left"
+                  onClick={() => { setLibraryOpen(false); void loadDoc(item.key); }}
+                >
+                  <FileText className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  <span className="truncate">{item.fileName}</span>
+                  {item.status !== 'ready' && (
+                    <Badge variant="warning" className="ml-auto shrink-0 text-[10px]">processing</Badge>
+                  )}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
-      </section>
 
-      <p className={`status status-${status}`}>{message}</p>
+        <Button
+          variant="ghost" size="icon"
+          className="h-8 w-8"
+          title="Refresh library"
+          onClick={() => void fetchLibrary().catch(console.error)}
+        >
+          <RefreshCw className="h-3.5 w-3.5" />
+        </Button>
 
-      <section className="workspace-grid">
-        <EditableDocument
-          key={documentTitle}
-          initialHtml={htmlDraft}
-          onChange={(nextHtml) => {
-            setHtmlDraft(nextHtml);
-            window.localStorage.setItem(draftStorageKey, nextHtml);
-          }}
-          documentTitle={documentTitle}
-        />
-      </section>
+        {canCompare && (
+          <>
+            <Separator orientation="vertical" className="h-5 mx-1 hidden sm:block" />
+            <Button
+              variant={showCompare ? 'secondary' : 'outline'}
+              size="sm"
+              className="hidden sm:inline-flex"
+              onClick={() => setShowCompare(v => !v)}
+            >
+              {showCompare
+                ? <><X className="h-3.5 w-3.5" /> Close original</>
+                : <><SplitSquareHorizontal className="h-3.5 w-3.5" /> Compare</>
+              }
+            </Button>
+          </>
+        )}
+      </div>
 
-      <p className="footer-note">{savedAt ? `Saved ${savedAt}` : ' '}</p>
-    </main>
+      {/* ── Workspace ── */}
+      <div className="flex flex-1 overflow-hidden gap-0">
+
+        {/* original DOCX pane — hidden on mobile even if showCompare is true */}
+        {showCompare && docxSource && (
+          <>
+            <div className="hidden sm:flex flex-col flex-1 overflow-hidden border-r">
+              <div className="flex items-center gap-2 px-4 h-10 border-b bg-muted/30 shrink-0">
+                <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Original DOCX</span>
+                {docTitle && <span className="text-xs text-muted-foreground">· {docTitle}</span>}
+              </div>
+              <div className="flex-1 overflow-hidden">
+                <DocxPane url={docxSource} />
+              </div>
+            </div>
+          </>
+        )}
+
+        {/* HTML editor pane */}
+        <div className="flex flex-col flex-1 overflow-hidden">
+          <div className="flex items-center gap-2 px-4 h-10 border-b bg-muted/30 shrink-0">
+            <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Converted HTML</span>
+            {docTitle && <span className="text-xs text-muted-foreground">· {docTitle}</span>}
+            {isReady && <Badge variant="outline" className="ml-auto text-[10px] text-muted-foreground">editable</Badge>}
+          </div>
+
+          <div className="flex-1 overflow-y-auto">
+            {!isReady && !htmlDraft ? (
+              <div className="flex flex-col items-center justify-center h-full gap-3 text-center p-8">
+                <div className="rounded-full bg-muted p-4">
+                  <FileText className="h-8 w-8 text-muted-foreground" />
+                </div>
+                <p className="text-sm text-muted-foreground max-w-xs">
+                  Choose a <strong>.docx</strong> file and click <strong>Convert</strong>, or open a document from the Library.
+                </p>
+              </div>
+            ) : (
+              <HtmlEditor
+                key={docTitle}
+                initialHtml={htmlDraft}
+                onChange={h => {
+                  setHtmlDraft(h);
+                  localStorage.setItem(draftKey, h);
+                }}
+              />
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* close library dropdown on outside click */}
+      {libraryOpen && (
+        <div className="fixed inset-0 z-40" onClick={() => setLibraryOpen(false)} />
+      )}
+    </div>
   );
 }

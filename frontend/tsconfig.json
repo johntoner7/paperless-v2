@@ -21,6 +21,9 @@
       "node"
     ],
     "baseUrl": ".",
+    "paths": {
+      "@/*": ["./*"]
+    },
     "plugins": [
       {
         "name": "next"
