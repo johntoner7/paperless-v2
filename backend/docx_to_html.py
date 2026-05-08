@@ -52,7 +52,10 @@ body {
 }
 
 .document {
+    max-width: 186mm;
+    margin: 0 auto;
     width: 100%;
+    box-sizing: border-box;
 }
 
 .document p,
@@ -114,7 +117,12 @@ body {
 .document table {
     width: 100%;
     border-collapse: collapse;
-    table-layout: auto;
+    table-layout: fixed;
+}
+
+.document td,
+.document th {
+    overflow-wrap: break-word;
 }
 
 .doc-table td,
@@ -122,8 +130,7 @@ body {
     border: 1px solid #d1d5db;
     padding: 6pt;
     vertical-align: top;
-    word-wrap: break-word;
-    overflow-wrap: anywhere;
+    overflow-wrap: break-word;
 }
 
 .docx-image {
@@ -283,10 +290,22 @@ def inject_page_css(html_document: str, page_setup: dict | None = None) -> str:
         f"}}"
     )
 
-    # Replace only the @page block in A4_STYLESHEET, keep the rest
     import re as _re
     base = _re.sub(r"@page\s*\{[^}]*\}", page_rule, A4_STYLESHEET, count=1)
-    style_block = f"\n<style>\n{base}\n</style>\n"
+
+    content_w = round(w - left - right, 4) if w else None
+    max_w_css = f"{content_w}in" if content_w else "186mm"
+    doc_rule = (
+        f".document {{\n"
+        f"    max-width: {max_w_css};\n"
+        f"    margin: 0 auto;\n"
+        f"    width: 100%;\n"
+        f"    box-sizing: border-box;\n"
+        f"}}"
+    )
+    base = _re.sub(r"\.document\s*\{[^}]*\}", doc_rule, base, count=1)
+
+    style_block = f"\n{base}\n"
 
     head_close = html_document.find("</head>")
     if head_close == -1:

@@ -342,7 +342,7 @@ def _render_image(node: dict, in_flex_para: bool = False) -> str:
 def _render_table(node: dict, ann: Optional[dict] = None) -> str:
     ann = ann or {}
     ann_css = _annotation_block_css(ann)
-    table_style = "width: 100%; border-collapse: collapse; table-layout: auto;"
+    table_style = "width: 100%; border-collapse: collapse; table-layout: fixed;"
     if ann_css:
         table_style += " " + ann_css
     tbl_borders = node.get("tbl_borders") or {}
@@ -390,7 +390,7 @@ def _render_cell(cell: dict, tbl_borders: Optional[dict] = None) -> str:
 
 
 def _cell_css(style: dict, tbl_borders: Optional[dict] = None) -> str:
-    parts: list[str] = ["padding: 4pt", "vertical-align: top"]
+    parts: list[str] = ["padding: 4pt", "vertical-align: top", "overflow-wrap: break-word"]
 
     va = style.get("vertical_align")
     if va:
