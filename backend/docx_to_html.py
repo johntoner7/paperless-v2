@@ -10,7 +10,7 @@ import re
 import sys
 import zipfile
 from pathlib import Path
-from typing import Dict, Iterable, Optional
+from typing import Dict, Iterable, List, Optional
 from xml.etree import ElementTree as ET
 
 
@@ -18,6 +18,7 @@ W_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 R_NS = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
 A_NS = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
 REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+WPS_NS = "{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingShape}"
 
 
 class DocxConversionError(RuntimeError):
@@ -30,6 +31,13 @@ class PdfConversionError(RuntimeError):
 
 VOID_HTML_TAGS = {"br", "img", "meta", "link", "hr", "input"}
 PRESERVE_EMPTY_HTML_TAGS = {"p", "td", "tr", "table", "colgroup", "col"}
+
+ORDERED_NUM_FMTS = frozenset({
+    "decimal", "upperRoman", "lowerRoman", "upperLetter", "lowerLetter",
+    "decimalZero", "ordinal", "cardinalText", "ordinalText",
+    "hex", "decimalEnclosedCircle", "decimalFullWidth", "decimalHalfWidth",
+    "decimalFullWidth2",
+})
 
 A4_STYLESHEET = """
 <style>
@@ -137,6 +145,54 @@ body {
     max-width: 100%;
     height: auto;
 }
+
+.document ul,
+.document ol {
+    margin: 0 0 4pt 2em;
+    padding: 0;
+}
+
+.document li {
+    margin: 0 0 2pt;
+}
+
+.document ul ul,
+.document ol ol,
+.document ul ol,
+.document ol ul {
+    margin-top: 0;
+    margin-bottom: 0;
+}
+
+.docx-textbox {
+    border: 1px solid #d1d5db;
+    padding: 6pt;
+    margin: 4pt 0;
+    display: inline-block;
+    max-width: 100%;
+    box-sizing: border-box;
+}
+
+.docx-footnotes,
+.docx-endnotes {
+    margin-top: 12pt;
+    border-top: 1px solid #d1d5db;
+    padding-top: 6pt;
+    font-size: 8pt;
+}
+
+.docx-fn-ref,
+.docx-en-ref {
+    font-size: 0.75em;
+    vertical-align: super;
+    line-height: 0;
+}
+
+.docx-fn-ref a,
+.docx-en-ref a {
+    text-decoration: none;
+    color: inherit;
+}
 </style>
 """.strip()
 
@@ -161,7 +217,14 @@ def _convert_docx_to_html(docx_path: str | Path, assets_dir: Optional[Path] = No
             relationships = _parse_relationships(_read_xml(archive, "word/_rels/document.xml.rels"))
             media = _load_media(archive)
 
-            # load any headers/footers referenced by the document relationships
+            try:
+                numbering = _parse_numbering(_read_xml(archive, "word/numbering.xml"))
+            except KeyError:
+                numbering = {}
+
+            footnotes = _parse_note_parts(archive, "word/footnotes.xml")
+            endnotes = _parse_note_parts(archive, "word/endnotes.xml")
+
             header_parts: list[tuple[ET.Element, Dict[str, Dict[str, str]]]] = []
             footer_parts: list[tuple[ET.Element, Dict[str, Dict[str, str]]]] = []
             for rel in relationships.values():
@@ -169,32 +232,26 @@ def _convert_docx_to_html(docx_path: str | Path, assets_dir: Optional[Path] = No
                 target = rel.get("target", "")
                 if not target or not rtype:
                     continue
-                # Only process header/footer relationship types
-                if not (rtype.endswith('/header') or rtype.endswith('/headers') or 
+                if not (rtype.endswith('/header') or rtype.endswith('/headers') or
                         rtype.endswith('/footer') or rtype.endswith('/footers')):
                     continue
-                
-                # relationship targets are relative to the "word/" folder
+
                 part_path = f"word/{target}" if not target.startswith("word/") else target
                 try:
                     part_xml = _read_xml(archive, part_path)
-                    # load relationships for this part (e.g., "word/footer1.xml" -> "word/_rels/footer1.xml.rels")
-                    # extract filename from part_path
                     part_dir, part_filename = part_path.rsplit("/", 1)
                     part_rels_path = f"{part_dir}/_rels/{part_filename}.rels"
                     try:
                         part_rels_root = _read_xml(archive, part_rels_path)
                         part_relationships = _parse_relationships(part_rels_root)
                     except KeyError:
-                        # part has no relationships
                         part_relationships = {}
-                    
+
                     if rtype.endswith('/header') or rtype.endswith('/headers'):
                         header_parts.append((part_xml, part_relationships))
                     elif rtype.endswith('/footer') or rtype.endswith('/footers'):
                         footer_parts.append((part_xml, part_relationships))
                 except KeyError:
-                    # missing optional part; ignore
                     pass
     except zipfile.BadZipFile as exc:
         raise DocxConversionError(f"Invalid DOCX archive: {path}") from exc
@@ -205,33 +262,30 @@ def _convert_docx_to_html(docx_path: str | Path, assets_dir: Optional[Path] = No
     if body is None:
         raise DocxConversionError("DOCX document body is missing")
 
+    footnote_collector: Dict = {"footnotes": [], "endnotes": []}
     blocks: list[str] = []
 
-    # render header parts first (so header images/branding appear at top)
     for hdr, hdr_rels in header_parts:
-        for child in hdr:
-            tag = _local_name(child.tag)
-            if tag == "p":
-                blocks.append(_render_paragraph(child, styles, hdr_rels, media, assets_dir))
-            elif tag == "tbl":
-                blocks.append(_render_table(child, styles, hdr_rels, media, assets_dir))
+        blocks.extend(_render_section_blocks(hdr, styles, numbering, hdr_rels, media, assets_dir, footnote_collector))
 
-    # render the main document body
-    for child in body:
-        tag = _local_name(child.tag)
-        if tag == "p":
-            blocks.append(_render_paragraph(child, styles, relationships, media, assets_dir))
-        elif tag == "tbl":
-            blocks.append(_render_table(child, styles, relationships, media, assets_dir))
+    blocks.extend(_render_section_blocks(body, styles, numbering, relationships, media, assets_dir, footnote_collector))
 
-    # render footer parts after the body
     for ftr, ftr_rels in footer_parts:
-        for child in ftr:
-            tag = _local_name(child.tag)
-            if tag == "p":
-                blocks.append(_render_paragraph(child, styles, ftr_rels, media, assets_dir))
-            elif tag == "tbl":
-                blocks.append(_render_table(child, styles, ftr_rels, media, assets_dir))
+        blocks.extend(_render_section_blocks(ftr, styles, numbering, ftr_rels, media, assets_dir, footnote_collector))
+
+    if footnote_collector["footnotes"] and footnotes:
+        fn_html = _render_notes_section(
+            footnotes, footnote_collector["footnotes"], styles, relationships, media, assets_dir, "footnote"
+        )
+        if fn_html:
+            blocks.append(fn_html)
+
+    if footnote_collector["endnotes"] and endnotes:
+        en_html = _render_notes_section(
+            endnotes, footnote_collector["endnotes"], styles, relationships, media, assets_dir, "endnote"
+        )
+        if en_html:
+            blocks.append(en_html)
 
     return _wrap_html("\n".join(blocks))
 
@@ -252,8 +306,6 @@ def convert_docx_to_normalized_html(docx_path: str | Path) -> str:
 
 
 def convert_docx_to_normalized_html_with_assets(docx_path: str | Path, assets_dir: str | Path) -> str:
-    # When assets are being extracted, preserve the original HTML structure
-    # so image `img` elements are not removed by normalization heuristics.
     return convert_docx_to_html_with_assets(docx_path, assets_dir)
 
 
@@ -395,12 +447,6 @@ def _analyze_html_structure(html_text: str) -> dict:
 
 
 def _validate_visual(docx_path: str, generated_html: str, reference_path: Optional[str] = None) -> dict:
-    """Run a lightweight Phase 4 validation: structural comparisons.
-
-    This produces counts of paragraphs/tables/images for the original DOCX
-    and the generated HTML. If a reference HTML is provided, it will be
-    analyzed as well.
-    """
     report: dict = {"docx": {}, "generated": {}, "reference": None, "summary": []}
 
     docx_stats = _analyze_docx_structure(docx_path)
@@ -418,7 +464,6 @@ def _validate_visual(docx_path: str, generated_html: str, reference_path: Option
         except Exception as exc:
             report["reference"] = {"error": str(exc)}
 
-    # simple comparisons
     for key in ("paragraphs", "tables", "images"):
         d = docx_stats.get(key, 0)
         g = html_stats.get(key, 0)
@@ -471,26 +516,53 @@ def _extract_paragraph_style(paragraph: ET.Element) -> dict:
         if ind_obj:
             result["indent"] = ind_obj
 
+    shd = ppr.find(f"{W_NS}shd")
+    if shd is not None:
+        fill = shd.get(f"{W_NS}fill") or shd.get("fill")
+        if fill and fill.upper() != "AUTO":
+            result["background"] = fill.upper()
+
+    pbdr = ppr.find(f"{W_NS}pBdr")
+    if pbdr is not None:
+        borders: dict = {}
+        for edge in ("top", "left", "bottom", "right"):
+            b = pbdr.find(f"{W_NS}{edge}")
+            if b is None:
+                continue
+            val = b.get(f"{W_NS}val") or b.get("val", "")
+            if val in ("none", "nil", ""):
+                continue
+            sz = b.get(f"{W_NS}sz") or b.get("sz")
+            color = b.get(f"{W_NS}color") or b.get("color", "auto")
+            try:
+                width_pt = round(int(sz) / 8, 2) if sz else 0.5
+            except (ValueError, TypeError):
+                width_pt = 0.5
+            borders[edge] = {
+                "style": "double" if val == "double" else "solid",
+                "width_pt": width_pt,
+                "color": color.upper() if color and color.upper() != "AUTO" else "000000",
+            }
+        if borders:
+            result["borders"] = borders
+
     return result
 
 
 def _extract_run_style(run_pr: ET.Element) -> dict:
     result: dict = {}
-    # font size (w:sz is in half-points)
     sz = run_pr.find(f"{W_NS}sz")
     if sz is not None:
         val = sz.get(f"{W_NS}val") or sz.get("val")
         if val:
             try:
                 pts = int(val) / 2
-                # prefer integer when possible
                 result["font_size_pt"] = int(pts) if pts.is_integer() else round(pts, 1)
             except Exception:
                 result["font_size"] = val
 
     rfonts = run_pr.find(f"{W_NS}rFonts")
     if rfonts is not None:
-        # attempt common attributes
         for key in ("ascii", "hAnsi", "cs"):
             v = rfonts.get(f"{W_NS}{key}") or rfonts.get(key)
             if v:
@@ -503,13 +575,20 @@ def _extract_run_style(run_pr: ET.Element) -> dict:
         if v:
             result["color"] = v
 
-    # include explicit flags for quick checks
     if run_pr.find(f"{W_NS}b") is not None:
         result["bold"] = True
     if run_pr.find(f"{W_NS}i") is not None:
         result["italic"] = True
     if run_pr.find(f"{W_NS}u") is not None:
         result["underline"] = True
+    if run_pr.find(f"{W_NS}strike") is not None:
+        result["strike"] = True
+
+    vert = run_pr.find(f"{W_NS}vertAlign")
+    if vert is not None:
+        v = vert.get(f"{W_NS}val") or vert.get("val")
+        if v in ("superscript", "subscript"):
+            result["vertical_align"] = v
 
     return result
 
@@ -524,14 +603,12 @@ def _extract_cell_style(cell: ET.Element) -> dict:
         v = valign.get(f"{W_NS}val") or valign.get("val")
         if v:
             result["vertical_align"] = v
-    # horizontal alignment may be declared at the cell or paragraph level
     jc = tcpr.find(f"{W_NS}jc")
     if jc is not None:
         v = jc.get(f"{W_NS}val") or jc.get("val")
         if v:
             result["alignment"] = v
 
-    # fallback: look for first paragraph alignment inside the cell
     first_p = cell.find(f"{W_NS}p")
     if first_p is not None:
         pjc = first_p.find(f"{W_NS}pPr/{W_NS}jc")
@@ -567,7 +644,6 @@ def _paragraph_style_to_css(pstyle: dict) -> str:
     if line is not None:
         try:
             ln = int(line)
-            # heuristic: convert twentieths of a point to a relative line-height
             lh = round(ln / 240, 2)
             parts.append(f"line-height: {lh};")
         except Exception:
@@ -589,6 +665,21 @@ def _paragraph_style_to_css(pstyle: dict) -> str:
         px = _twips_to_px(first)
         if px is not None:
             parts.append(f"text-indent: {px}px;")
+
+    background = pstyle.get("background")
+    if background:
+        bg = background if background.startswith("#") else f"#{background}"
+        parts.append(f"background-color: {bg};")
+
+    borders = pstyle.get("borders") or {}
+    for edge in ("top", "right", "bottom", "left"):
+        b = borders.get(edge)
+        if b:
+            w = b.get("width_pt", 0.5)
+            s = b.get("style", "solid")
+            c = b.get("color", "000000")
+            col = c if c.startswith("#") else f"#{c}"
+            parts.append(f"border-{edge}: {w}pt {s} {col};")
 
     return " ".join(parts)
 
@@ -626,7 +717,6 @@ def _cell_style_to_css(cstyle: dict) -> str:
         if v == "center":
             v = "middle"
         parts.append(f"vertical-align: {v};")
-    # horizontal alignment
     align = cstyle.get("alignment")
     if align:
         a = align
@@ -645,6 +735,113 @@ def _parse_styles(styles_root: ET.Element) -> Dict[str, str]:
         if style_id and style_type == "paragraph" and name is not None:
             styles[style_id] = name.get(f"{W_NS}val", "")
     return styles
+
+
+def _parse_numbering(numbering_root: ET.Element) -> Dict[str, Dict[int, str]]:
+    abstract: Dict[str, Dict[int, str]] = {}
+    for an in numbering_root.findall(f"{W_NS}abstractNum"):
+        aid = an.get(f"{W_NS}abstractNumId")
+        if aid is None:
+            continue
+        levels: Dict[int, str] = {}
+        for lvl in an.findall(f"{W_NS}lvl"):
+            ilvl_val = lvl.get(f"{W_NS}ilvl")
+            nf = lvl.find(f"{W_NS}numFmt")
+            if ilvl_val is not None and nf is not None:
+                fmt = nf.get(f"{W_NS}val") or nf.get("val") or "bullet"
+                try:
+                    levels[int(ilvl_val)] = fmt
+                except ValueError:
+                    pass
+        abstract[aid] = levels
+
+    result: Dict[str, Dict[int, str]] = {}
+    for num in numbering_root.findall(f"{W_NS}num"):
+        nid = num.get(f"{W_NS}numId")
+        aid_elem = num.find(f"{W_NS}abstractNumId")
+        if nid and aid_elem is not None:
+            aid = aid_elem.get(f"{W_NS}val")
+            result[nid] = abstract.get(aid or "", {})
+    return result
+
+
+def _get_num_props(paragraph: ET.Element) -> tuple[Optional[str], int]:
+    ppr = paragraph.find(f"{W_NS}pPr")
+    if ppr is None:
+        return None, 0
+    num_pr = ppr.find(f"{W_NS}numPr")
+    if num_pr is None:
+        return None, 0
+    num_id_elem = num_pr.find(f"{W_NS}numId")
+    ilvl_elem = num_pr.find(f"{W_NS}ilvl")
+    num_id: Optional[str] = None
+    if num_id_elem is not None:
+        num_id = num_id_elem.get(f"{W_NS}val") or num_id_elem.get("val")
+    ilvl = 0
+    if ilvl_elem is not None:
+        v = ilvl_elem.get(f"{W_NS}val") or ilvl_elem.get("val")
+        if v is not None:
+            try:
+                ilvl = int(v)
+            except ValueError:
+                pass
+    if not num_id or num_id == "0":
+        return None, 0
+    return num_id, ilvl
+
+
+def _get_list_tag(numbering: Dict[str, Dict[int, str]], num_id: str, ilvl: int) -> str:
+    fmt = numbering.get(num_id, {}).get(ilvl, "bullet")
+    return "ol" if fmt in ORDERED_NUM_FMTS else "ul"
+
+
+def _parse_note_parts(archive: zipfile.ZipFile, path: str) -> Dict[str, ET.Element]:
+    try:
+        root = _read_xml(archive, path)
+    except KeyError:
+        return {}
+    tag_name = "footnote" if "footnote" in path else "endnote"
+    notes: Dict[str, ET.Element] = {}
+    for note in root.findall(f"{W_NS}{tag_name}"):
+        note_id = note.get(f"{W_NS}id")
+        note_type = note.get(f"{W_NS}type", "")
+        if note_id and note_type not in ("separator", "continuationSeparator"):
+            notes[note_id] = note
+    return notes
+
+
+def _render_notes_section(
+    notes: Dict[str, ET.Element],
+    refs: List[str],
+    styles: Dict[str, str],
+    relationships: Dict[str, Dict[str, str]],
+    media: Dict[str, bytes],
+    assets_dir: Optional[Path],
+    note_type: str,
+) -> str:
+    css_class = "docx-footnotes" if note_type == "footnote" else "docx-endnotes"
+    anchor_prefix = "docx-fn" if note_type == "footnote" else "docx-en"
+    items = []
+    for i, note_id in enumerate(refs, 1):
+        note_elem = notes.get(note_id)
+        if note_elem is None:
+            continue
+        blocks = []
+        for child in note_elem:
+            tag = _local_name(child.tag)
+            if tag == "p":
+                blocks.append(_render_paragraph(child, styles, relationships, media, assets_dir))
+            elif tag == "tbl":
+                blocks.append(_render_table(child, styles, relationships, media, assets_dir))
+        content = "".join(blocks)
+        items.append(
+            f'<div id="{anchor_prefix}-{note_id}" class="docx-note">'
+            f'<sup>{i}</sup> {content}'
+            f'</div>'
+        )
+    if not items:
+        return ""
+    return f'<section class="{css_class}">{"".join(items)}</section>'
 
 
 def _parse_relationships(rels_root: ET.Element) -> Dict[str, Dict[str, str]]:
@@ -669,40 +866,24 @@ def _load_media(archive: zipfile.ZipFile) -> Dict[str, bytes]:
 
 
 def _find_media_bytes(media: Dict[str, bytes], target: str) -> tuple[Optional[str], Optional[bytes]]:
-    """Find the best-match media entry for a relationship target.
-
-    Returns a tuple of (resolved_media_path, bytes) or (None, None) when not found.
-    Matching strategy (deterministic):
-    - Normalize target via _resolve_media_path and try exact match
-    - Try the raw target as given
-    - Try stripping any leading "word/" prefix
-    - Fallback to matching by basename if there is a unique match
-    """
     if not target:
         return None, None
 
     candidates = []
 
-    # primary normalized form
     primary = _resolve_media_path(target)
     candidates.append(primary)
-
-    # raw target as-is
     candidates.append(target)
 
-    # strip leading word/ if present
     if target.startswith("word/"):
         candidates.append(target[len("word/"):])
 
-    # strip leading slashes
     candidates.append(target.lstrip("/"))
 
-    # try candidates in order
     for cand in candidates:
         if cand in media:
             return cand, media[cand]
 
-    # fallback: match by basename if unique
     basename = os.path.basename(target)
     if basename:
         matches = [k for k in media.keys() if os.path.basename(k) == basename]
@@ -713,12 +894,85 @@ def _find_media_bytes(media: Dict[str, bytes], target: str) -> tuple[Optional[st
     return None, None
 
 
+def _render_section_blocks(
+    elements: ET.Element,
+    styles: Dict[str, str],
+    numbering: Dict[str, Dict[int, str]],
+    relationships: Dict[str, Dict[str, str]],
+    media: Dict[str, bytes],
+    assets_dir: Optional[Path],
+    footnote_collector: Optional[Dict],
+) -> List[str]:
+    result: List[str] = []
+    list_stack: List[Dict] = []  # each entry: {'tag': str, 'num_id': str, 'ilvl': int}
+
+    def close_lists_to(target_ilvl: int, target_num_id: str) -> None:
+        while list_stack:
+            top = list_stack[-1]
+            if top["num_id"] != target_num_id or top["ilvl"] > target_ilvl:
+                result.append(f"</{list_stack.pop()['tag']}>")
+            else:
+                break
+
+    def close_all_lists() -> None:
+        while list_stack:
+            result.append(f"</{list_stack.pop()['tag']}>")
+
+    def open_list(num_id: str, ilvl: int, list_tag: str) -> None:
+        result.append(f"<{list_tag}>")
+        list_stack.append({"tag": list_tag, "num_id": num_id, "ilvl": ilvl})
+
+    for child in elements:
+        tag = _local_name(child.tag)
+        if tag == "p":
+            num_id, ilvl = _get_num_props(child)
+            if num_id:
+                list_tag = _get_list_tag(numbering, num_id, ilvl)
+                if not list_stack:
+                    open_list(num_id, ilvl, list_tag)
+                elif list_stack[-1]["num_id"] != num_id:
+                    close_all_lists()
+                    open_list(num_id, ilvl, list_tag)
+                elif ilvl > list_stack[-1]["ilvl"]:
+                    open_list(num_id, ilvl, list_tag)
+                elif ilvl < list_stack[-1]["ilvl"]:
+                    close_lists_to(ilvl, num_id)
+                inner = _render_paragraph_inner(child, styles, relationships, media, assets_dir, footnote_collector)
+                result.append(f"<li>{inner}</li>")
+            else:
+                close_all_lists()
+                result.append(_render_paragraph(child, styles, relationships, media, assets_dir, footnote_collector))
+        elif tag == "tbl":
+            close_all_lists()
+            result.append(_render_table(child, styles, relationships, media, assets_dir, footnote_collector))
+
+    close_all_lists()
+    return result
+
+
+def _render_paragraph_inner(
+    paragraph: ET.Element,
+    styles: Dict[str, str],
+    relationships: Dict[str, Dict[str, str]],
+    media: Dict[str, bytes],
+    assets_dir: Optional[Path] = None,
+    footnote_collector: Optional[Dict] = None,
+) -> str:
+    fragments = [
+        _render_inline(child, styles, relationships, media, assets_dir, footnote_collector)
+        for child in paragraph
+        if _local_name(child.tag) in {"r", "hyperlink", "fldSimple"}
+    ]
+    return _join_html_fragments(fragments)
+
+
 def _render_paragraph(
     paragraph: ET.Element,
     styles: Dict[str, str],
     relationships: Dict[str, Dict[str, str]],
     media: Dict[str, bytes],
     assets_dir: Optional[Path] = None,
+    footnote_collector: Optional[Dict] = None,
 ) -> str:
     style_id = None
     style_element = paragraph.find(f"{W_NS}pPr/{W_NS}pStyle")
@@ -726,12 +980,8 @@ def _render_paragraph(
         style_id = style_element.get(f"{W_NS}val")
 
     tag = _paragraph_tag(style_id, styles)
-    fragments = [
-        _render_inline(child, relationships, media, assets_dir) for child in paragraph if _local_name(child.tag) in {"r", "hyperlink"}
-    ]
-    content = _join_html_fragments(fragments)
+    content = _render_paragraph_inner(paragraph, styles, relationships, media, assets_dir, footnote_collector)
 
-    # extract paragraph-level styling attributes (Phase 1)
     p_style = _extract_paragraph_style(paragraph)
     style_attr = html.escape(json.dumps(p_style, separators=(",", ":"), ensure_ascii=False), quote=True)
     css = _paragraph_style_to_css(p_style)
@@ -761,9 +1011,10 @@ def _render_table(
     relationships: Dict[str, Dict[str, str]],
     media: Dict[str, bytes],
     assets_dir: Optional[Path] = None,
+    footnote_collector: Optional[Dict] = None,
 ) -> str:
     column_widths = _parse_table_column_widths(table)
-    logical_rows = _build_table_rows(table, styles, relationships, media, assets_dir)
+    logical_rows = _build_table_rows(table, styles, relationships, media, assets_dir, footnote_collector)
     rows = []
     for row_entries in logical_rows:
         cells = []
@@ -778,7 +1029,6 @@ def _render_table(
                 cell_attrs.append(f' rowspan="{entry["rowspan"]}"')
             if entry["width"] is not None:
                 cell_attrs.append(f' width="{entry["width"]}"')
-            # attach extracted cell style metadata when available and apply inline CSS
             if entry.get("cell_style"):
                 style_attr = html.escape(json.dumps(entry["cell_style"], separators=(",", ":"), ensure_ascii=False), quote=True)
                 css = _cell_style_to_css(entry["cell_style"])
@@ -789,7 +1039,6 @@ def _render_table(
             cells.append(f"<td{''.join(cell_attrs)}>{_join_html_fragments(entry['blocks'])}</td>")
         rows.append(f"<tr>{''.join(cells)}</tr>")
 
-    # generate colgroup using percentages so table can reliably be 100% width
     colgroup = ""
     if column_widths:
         total = sum(w for w in column_widths if w is not None)
@@ -806,7 +1055,6 @@ def _render_table(
 
         colgroup = f"<colgroup>{''.join(columns)}</colgroup>"
 
-    # ensure table occupies full container width (Phase 3 requirement)
     table_style = ' style="width: 100%;"'
     return f"<table{table_style}>{colgroup}{''.join(rows)}</table>"
 
@@ -817,6 +1065,7 @@ def _build_table_rows(
     relationships: Dict[str, Dict[str, str]],
     media: Dict[str, bytes],
     assets_dir: Optional[Path] = None,
+    footnote_collector: Optional[Dict] = None,
 ) -> list[list[dict[str, object]]]:
     row_cells: list[list[dict[str, object]]] = []
     for row_index, row in enumerate(table.findall(f"{W_NS}tr")):
@@ -830,15 +1079,14 @@ def _build_table_rows(
             for child in cell:
                 tag = _local_name(child.tag)
                 if tag == "p":
-                    rendered = _render_paragraph(child, styles, relationships, media, assets_dir)
+                    rendered = _render_paragraph(child, styles, relationships, media, assets_dir, footnote_collector)
                 elif tag == "tbl":
-                    rendered = _render_table(child, styles, relationships, media, assets_dir)
+                    rendered = _render_table(child, styles, relationships, media, assets_dir, footnote_collector)
                 else:
                     rendered = ""
                 if rendered:
                     cell_blocks.append(rendered)
 
-            # extract cell-level styles (vertical alignment etc.) for Phase 1
             cell_style = _extract_cell_style(cell)
 
             entries.append(
@@ -892,11 +1140,27 @@ def _find_table_cell_by_column(
 
 def _render_inline(
     node: ET.Element,
+    styles: Dict[str, str],
     relationships: Dict[str, Dict[str, str]],
     media: Dict[str, bytes],
     assets_dir: Optional[Path] = None,
+    footnote_collector: Optional[Dict] = None,
 ) -> str:
     tag = _local_name(node.tag)
+
+    if tag == "fldSimple":
+        inner = _join_html_fragments(
+            _render_inline(child, styles, relationships, media, assets_dir, footnote_collector)
+            for child in node
+            if _local_name(child.tag) in {"r", "hyperlink", "fldSimple"}
+        )
+        instr = node.get(f"{W_NS}instr", "")
+        if "HYPERLINK" in instr:
+            url_match = re.search(r'HYPERLINK\s+"([^"]+)"', instr)
+            if url_match:
+                url = url_match.group(1)
+                return f'<a href="{html.escape(url, quote=True)}">{inner}</a>'
+        return inner
 
     if tag == "hyperlink":
         link_target = None
@@ -907,7 +1171,9 @@ def _render_inline(
                 link_target = relationship.get("target")
 
         inner = _join_html_fragments(
-            _render_inline(child, relationships, media, assets_dir) for child in node if _local_name(child.tag) == "r"
+            _render_inline(child, styles, relationships, media, assets_dir, footnote_collector)
+            for child in node
+            if _local_name(child.tag) == "r"
         )
         if not inner:
             return ""
@@ -932,8 +1198,19 @@ def _render_inline(
         if run_properties.find(f"{W_NS}u") is not None:
             prefix.append("<u>")
             suffix.insert(0, "</u>")
+        if run_properties.find(f"{W_NS}strike") is not None:
+            prefix.append("<s>")
+            suffix.insert(0, "</s>")
+        vert_align = run_properties.find(f"{W_NS}vertAlign")
+        if vert_align is not None:
+            v = vert_align.get(f"{W_NS}val") or vert_align.get("val", "")
+            if v == "superscript":
+                prefix.append("<sup>")
+                suffix.insert(0, "</sup>")
+            elif v == "subscript":
+                prefix.append("<sub>")
+                suffix.insert(0, "</sub>")
 
-        # extract run-level style metadata (Phase 1)
         run_style = _extract_run_style(run_properties)
 
     parts = []
@@ -947,13 +1224,27 @@ def _render_inline(
         elif child_tag in {"br", "cr"}:
             parts.append("<br>")
         elif child_tag == "drawing":
-            parts.append(_render_drawing(child, relationships, media, assets_dir))
+            parts.append(_render_drawing(child, styles, relationships, media, assets_dir))
+        elif child_tag in {"footnoteReference", "endnoteReference"} and footnote_collector is not None:
+            note_id = child.get(f"{W_NS}id")
+            if note_id:
+                key = "footnotes" if child_tag == "footnoteReference" else "endnotes"
+                anchor_prefix = "docx-fn" if child_tag == "footnoteReference" else "docx-en"
+                css_class = "docx-fn-ref" if child_tag == "footnoteReference" else "docx-en-ref"
+                refs = footnote_collector[key]
+                if note_id not in refs:
+                    refs.append(note_id)
+                idx = refs.index(note_id) + 1
+                parts.append(
+                    f'<sup class="{css_class}">'
+                    f'<a href="#{anchor_prefix}-{note_id}">{idx}</a>'
+                    f'</sup>'
+                )
 
     content = "".join(parts)
     if not content:
         return ""
 
-    # If run-level metadata exists, wrap with a span and apply inline CSS (Phase 2)
     span_prefix = ""
     span_suffix = ""
     if run_style:
@@ -968,10 +1259,25 @@ def _render_inline(
 
 def _render_drawing(
     drawing: ET.Element,
+    styles: Dict[str, str],
     relationships: Dict[str, Dict[str, str]],
     media: Dict[str, bytes],
     assets_dir: Optional[Path] = None,
 ) -> str:
+    # Text box takes priority over image rendering
+    txbx = drawing.find(f".//{WPS_NS}txbx")
+    if txbx is not None:
+        txbx_content = txbx.find(f"{W_NS}txbxContent")
+        if txbx_content is not None:
+            blocks = []
+            for child in txbx_content:
+                child_tag = _local_name(child.tag)
+                if child_tag == "p":
+                    blocks.append(_render_paragraph(child, styles, relationships, media, assets_dir))
+                elif child_tag == "tbl":
+                    blocks.append(_render_table(child, styles, relationships, media, assets_dir))
+            return f'<div class="docx-textbox">{"".join(blocks)}</div>'
+
     # Try DrawingML blip first
     embed = None
     blip = drawing.find(f".//{A_NS}blip")
@@ -982,7 +1288,6 @@ def _render_drawing(
     if not embed:
         vml = drawing.find('.//{urn:schemas-microsoft-com:vml}imagedata')
         if vml is not None:
-            # r:id attribute is stored with the R namespace
             embed = vml.get(f"{R_NS}id") or vml.get(f"{R_NS}embed") or vml.get("id")
 
     if not embed:
@@ -1007,46 +1312,36 @@ def _render_drawing(
     if height is not None:
         dimension_attrs.append(f' height="{height}"')
 
-    # Extract anchor positioning to prevent paragraph alignment from affecting absolute-positioned images
     style_overrides = ""
     WP_NS = "{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}"
     anchor = drawing.find(f".//{WP_NS}anchor")
     if anchor is not None:
         positionH = anchor.find(f"{WP_NS}positionH")
-        positionV = anchor.find(f"{WP_NS}positionV")
-        
+
         if positionH is not None:
             relativeFrom_h = positionH.get("relativeFrom", "")
             posOffset_h_elem = positionH.find(f"{WP_NS}posOffset")
-            
+
             css_parts = []
-            
-            # For absolutely-positioned images (margin/page), apply absolute CSS positioning
+
             if relativeFrom_h in ("margin", "page") and posOffset_h_elem is not None:
                 try:
                     posOffset_h = int(posOffset_h_elem.text or 0)
-                    # Convert EMUs to inches: 914400 EMUs = 1 inch
-                    # For far-right positioned images (> 6 million EMUs = 6.5+ inches),
-                    # reposition to left side to avoid right-alignment issues
                     if posOffset_h > 6000000:
-                        # Reposition to left side of page
                         css_parts.append("position: absolute")
                         css_parts.append("left: 0.5in")
                         css_parts.append("top: auto")
                     else:
-                        # Reposition based on anchor coordinates
                         inches_h = posOffset_h / 914400
                         css_parts.append("position: absolute")
                         css_parts.append(f"left: {inches_h:.2f}in")
                         css_parts.append("top: auto")
-                    
-                    # Ensure the image doesn't inherit paragraph text alignment
+
                     css_parts.append("float: none")
                     css_parts.append("display: block")
-                    
+
                     style_overrides = f' style="{"; ".join(css_parts)};"'
                 except (ValueError, TypeError):
-                    # If parsing fails, fall back to simple override
                     style_overrides = ' style="float: none; display: block;"'
 
     dimension_suffix = "".join(dimension_attrs)
@@ -1146,15 +1441,9 @@ def _encode_image_data_uri(mime_type: str, image_bytes: bytes) -> str:
 
 
 def _resolve_media_path(target: str) -> str:
-    """Normalize relationship target to a predictable archive media path.
-
-    Handles targets like "media/image1.png", "../media/image1.png",
-    "/media/image1.png" and already-prefixed "word/media/...".
-    """
     if not target:
         return target
 
-    # strip any leading slashes and parent-directory segments
     t = target.lstrip("/")
     while t.startswith("../"):
         t = t[3:]
@@ -1227,7 +1516,6 @@ def _cli_main(argv: Optional[list[str]] = None) -> int:
             _write_file_text(report_path, json.dumps(report, indent=2, ensure_ascii=False))
             print(f"Wrote validation report: {report_path}")
 
-        # produce PDF from the HTML we just generated so assets are consistent
         pdf_bytes = convert_html_to_pdf(html_doc, pdf_path=None)
         _write_file_bytes(out_pdf, pdf_bytes)
         print(f"Wrote PDF: {out_pdf}")
@@ -1236,9 +1524,6 @@ def _cli_main(argv: Optional[list[str]] = None) -> int:
         return 3
 
     return 0
-
-
-
 
 
 def _local_name(tag: str) -> str:
@@ -1336,7 +1621,7 @@ def _is_empty_spacer_paragraph(node: "_Node | str") -> bool:
         if isinstance(child, str):
             text_content.append(html.unescape(child))
 
-    return not "".join(text_content).replace("\u00a0", "").strip()
+    return not "".join(text_content).replace(" ", "").strip()
 
 
 def _normalize_attrs(node: "_Node") -> dict[str, str]:
@@ -1430,7 +1715,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     except DocxConversionError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
-    
+
     try:
         pdf_output = convert_html_to_pdf(html_output)
         Path("output.pdf").write_bytes(pdf_output)
