@@ -137,6 +137,6 @@
 /* On tablet and up: normal display */
 @media (min-width: 641px) {
   .document-pane {
-    align-items: center;
+    align-items: flex-start;
   }
 }
