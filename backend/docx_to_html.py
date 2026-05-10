@@ -262,7 +262,7 @@ def _convert_docx_to_html(docx_path: str | Path, assets_dir: Optional[Path] = No
     if body is None:
         raise DocxConversionError("DOCX document body is missing")
 
-    footnote_collector: Dict = {"footnotes": [], "endnotes": []}
+    footnote_collector: Dict = {"footnotes": [], "endnotes": [], "block_count": 0}
     blocks: list[str] = []
 
     for hdr, hdr_rels in header_parts:
@@ -617,6 +617,22 @@ def _extract_cell_style(cell: ET.Element) -> dict:
             if v and "alignment" not in result:
                 result["alignment"] = v
 
+    # Cell margins (w:tcMar) — stored in twips
+    tcmar = tcpr.find(f"{W_NS}tcMar")
+    if tcmar is not None:
+        margins: dict = {}
+        for edge in ("top", "left", "bottom", "right"):
+            edge_elem = tcmar.find(f"{W_NS}{edge}")
+            if edge_elem is not None:
+                w_val = edge_elem.get(f"{W_NS}w") or edge_elem.get("w")
+                if w_val:
+                    try:
+                        margins[edge] = int(w_val)
+                    except ValueError:
+                        pass
+        if margins:
+            result["margins"] = margins
+
     return result
 
 
@@ -707,6 +723,29 @@ def _run_style_to_css(rstyle: dict) -> str:
     return " ".join(parts)
 
 
+def _paragraph_combined_css(p_style: dict, r_style: dict) -> str:
+    """Build CSS for a paragraph element combining paragraph and style-inherited run properties."""
+    parts: list[str] = []
+    p_css = _paragraph_style_to_css(p_style)
+    if p_css:
+        parts.append(p_css)
+    fs = r_style.get("font_size_pt")
+    if fs is not None:
+        parts.append(f"font-size: {fs}pt;")
+    ff = r_style.get("font_family")
+    if ff:
+        parts.append(f"font-family: {ff};")
+    color = r_style.get("color")
+    if color:
+        c = color if color.startswith("#") else f"#{color}"
+        parts.append(f"color: {c};")
+    if r_style.get("bold"):
+        parts.append("font-weight: 700;")
+    if r_style.get("italic"):
+        parts.append("font-style: italic;")
+    return " ".join(parts)
+
+
 def _cell_style_to_css(cstyle: dict) -> str:
     parts: list[str] = []
     if not cstyle:
@@ -723,18 +762,75 @@ def _cell_style_to_css(cstyle: dict) -> str:
         if a == "both":
             a = "justify"
         parts.append(f"text-align: {a};")
+    margins = cstyle.get("margins") or {}
+    if margins:
+        top    = _twips_to_px(str(margins.get("top",    0))) or 0
+        right  = _twips_to_px(str(margins.get("right",  0))) or 0
+        bottom = _twips_to_px(str(margins.get("bottom", 0))) or 0
+        left   = _twips_to_px(str(margins.get("left",   0))) or 0
+        parts.append(f"padding: {top}px {right}px {bottom}px {left}px;")
     return " ".join(parts)
 
 
-def _parse_styles(styles_root: ET.Element) -> Dict[str, str]:
-    styles: Dict[str, str] = {}
+def _parse_styles(styles_root: ET.Element) -> Dict[str, dict]:
+    """Parse styles.xml into a dict of {styleId: {name, type, based_on, p_style, r_style}}."""
+    styles: Dict[str, dict] = {}
     for style in styles_root.findall(f"{W_NS}style"):
         style_id = style.get(f"{W_NS}styleId")
-        style_type = style.get(f"{W_NS}type")
-        name = style.find(f"{W_NS}name")
-        if style_id and style_type == "paragraph" and name is not None:
-            styles[style_id] = name.get(f"{W_NS}val", "")
+        if not style_id:
+            continue
+        style_type = style.get(f"{W_NS}type", "")
+        name_elem = style.find(f"{W_NS}name")
+        name = name_elem.get(f"{W_NS}val", "") if name_elem is not None else ""
+        based_on_elem = style.find(f"{W_NS}basedOn")
+        based_on = based_on_elem.get(f"{W_NS}val") if based_on_elem is not None else None
+        p_style: dict = {}
+        r_style: dict = {}
+        if style_type == "paragraph":
+            p_style = _extract_paragraph_style(style)
+        rpr = style.find(f"{W_NS}rPr")
+        if rpr is not None:
+            r_style = _extract_run_style(rpr)
+        styles[style_id] = {
+            "name": name,
+            "type": style_type,
+            "based_on": based_on,
+            "p_style": p_style,
+            "r_style": r_style,
+        }
     return styles
+
+
+def _resolve_style(style_id: Optional[str], styles: Dict[str, dict]) -> dict:
+    """Walk the basedOn chain and return merged {p_style, r_style} with base → derived priority."""
+    chain: list[dict] = []
+    visited: set[str] = set()
+    current = style_id
+    while current and current not in visited:
+        visited.add(current)
+        entry = styles.get(current)
+        if entry is None:
+            break
+        chain.append(entry)
+        current = entry.get("based_on")
+
+    p_style: dict = {}
+    r_style: dict = {}
+    for entry in reversed(chain):
+        p_style = _merge_dicts(p_style, entry.get("p_style", {}))
+        r_style = {**r_style, **entry.get("r_style", {})}
+    return {"p_style": p_style, "r_style": r_style}
+
+
+def _merge_dicts(base: dict, override: dict) -> dict:
+    """Shallow-merge two dicts, recursively merging nested dicts."""
+    result = dict(base)
+    for k, v in override.items():
+        if isinstance(v, dict) and k in result and isinstance(result[k], dict):
+            result[k] = _merge_dicts(result[k], v)
+        else:
+            result[k] = v
+    return result
 
 
 def _parse_numbering(numbering_root: ET.Element) -> Dict[str, Dict[int, str]]:
@@ -982,10 +1078,34 @@ def _render_paragraph(
     tag = _paragraph_tag(style_id, styles)
     content = _render_paragraph_inner(paragraph, styles, relationships, media, assets_dir, footnote_collector)
 
-    p_style = _extract_paragraph_style(paragraph)
-    style_attr = html.escape(json.dumps(p_style, separators=(",", ":"), ensure_ascii=False), quote=True)
-    css = _paragraph_style_to_css(p_style)
+    # Resolve full style chain (base → derived), then overlay direct paragraph formatting
+    style_resolved = _resolve_style(style_id, styles)
+    direct_p_style = _extract_paragraph_style(paragraph)
+    merged_p_style = _merge_dicts(style_resolved["p_style"], direct_p_style)
+    style_r_style = style_resolved["r_style"]
+    css = _paragraph_combined_css(merged_p_style, style_r_style)
     css_attr = f' style="{html.escape(css, quote=True)}"' if css else ""
+
+    if footnote_collector is not None:
+        footnote_collector["block_count"] += 1
+        block_id = f"p_{footnote_collector['block_count']}"
+    else:
+        block_id = None
+
+    meta: dict = {
+        "type": "paragraph",
+        "htmlTag": tag,
+        "styleName": styles.get(style_id, {}).get("name", "") if style_id else "",
+        "styleProperties": {
+            "paragraphProperties": style_resolved["p_style"],
+            "runProperties": style_r_style,
+        },
+        "directFormatting": direct_p_style,
+        "cssStyle": css,
+    }
+    if block_id:
+        meta["blockId"] = block_id
+    style_attr = html.escape(json.dumps(meta, separators=(",", ":"), ensure_ascii=False), quote=True)
 
     if not content.strip():
         return f'<p class="docx-empty-paragraph" data-docx-style="{style_attr}"{css_attr}></p>'
@@ -993,11 +1113,12 @@ def _render_paragraph(
     return f"<{tag} data-docx-style=\"{style_attr}\"{css_attr}>{content}</{tag}>"
 
 
-def _paragraph_tag(style_id: Optional[str], styles: Dict[str, str]) -> str:
+def _paragraph_tag(style_id: Optional[str], styles: Dict[str, dict]) -> str:
     if not style_id:
         return "p"
 
-    style_name = styles.get(style_id, style_id).strip().lower()
+    entry = styles.get(style_id)
+    style_name = (entry["name"] if entry else style_id or "").strip().lower()
     match = re.search(r"heading\s*([1-6])", style_name)
     if match:
         return f"h{match.group(1)}"
@@ -1030,8 +1151,13 @@ def _render_table(
             if entry["width"] is not None:
                 cell_attrs.append(f' width="{entry["width"]}"')
             if entry.get("cell_style"):
-                style_attr = html.escape(json.dumps(entry["cell_style"], separators=(",", ":"), ensure_ascii=False), quote=True)
                 css = _cell_style_to_css(entry["cell_style"])
+                cell_meta = {
+                    "type": "cell",
+                    "styleProperties": entry["cell_style"],
+                    "cssStyle": css,
+                }
+                style_attr = html.escape(json.dumps(cell_meta, separators=(",", ":"), ensure_ascii=False), quote=True)
                 css_attr = f' style="{html.escape(css, quote=True)}"' if css else ""
                 cell_attrs.append(f' data-docx-style="{style_attr}"')
                 if css_attr:
@@ -1248,8 +1374,13 @@ def _render_inline(
     span_prefix = ""
     span_suffix = ""
     if run_style:
-        style_attr = html.escape(json.dumps(run_style, separators=(",", ":"), ensure_ascii=False), quote=True)
         css = _run_style_to_css(run_style)
+        run_meta = {
+            "type": "run",
+            "directFormatting": run_style,
+            "cssStyle": css,
+        }
+        style_attr = html.escape(json.dumps(run_meta, separators=(",", ":"), ensure_ascii=False), quote=True)
         css_attr = f' style="{html.escape(css, quote=True)}"' if css else ""
         span_prefix = f'<span data-docx-style="{style_attr}"{css_attr}>'
         span_suffix = "</span>"
