@@ -40,7 +40,9 @@ def build_docx_ast(docx_path: str | Path) -> dict:
     try:
         with zipfile.ZipFile(path) as archive:
             document_xml = _read_xml(archive, "word/document.xml")
-            styles = _parse_styles(_read_xml(archive, "word/styles.xml"))
+            styles_root = _read_xml(archive, "word/styles.xml")
+            styles = _parse_styles(styles_root)
+            table_styles = _parse_table_styles(styles_root)
             relationships = _parse_relationships(
                 _read_xml(archive, "word/_rels/document.xml.rels")
             )
@@ -85,10 +87,10 @@ def build_docx_ast(docx_path: str | Path) -> dict:
 
     sections: list[dict] = []
     for hdr, hdr_rels in header_parts:
-        sections.append({"kind": "header", "blocks": _build_blocks(hdr, styles, hdr_rels, media)})
-    sections.append({"kind": "body", "blocks": _build_blocks(body_elem, styles, relationships, media)})
+        sections.append({"kind": "header", "blocks": _build_blocks(hdr, styles, hdr_rels, media, table_styles)})
+    sections.append({"kind": "body", "blocks": _build_blocks(body_elem, styles, relationships, media, table_styles)})
     for ftr, ftr_rels in footer_parts:
-        sections.append({"kind": "footer", "blocks": _build_blocks(ftr, styles, ftr_rels, media)})
+        sections.append({"kind": "footer", "blocks": _build_blocks(ftr, styles, ftr_rels, media, table_styles)})
 
     images = {
         path_key: {
@@ -117,14 +119,20 @@ def build_docx_ast(docx_path: str | Path) -> dict:
 # Block builders
 # ---------------------------------------------------------------------------
 
-def _build_blocks(root: ET.Element, styles: dict, relationships: dict, media: dict) -> list[dict]:
+def _build_blocks(
+    root: ET.Element,
+    styles: dict,
+    relationships: dict,
+    media: dict,
+    table_styles: dict | None = None,
+) -> list[dict]:
     blocks: list[dict] = []
     for child in root:
         tag = _local_name(child.tag)
         if tag == "p":
             blocks.append(_build_paragraph(child, styles, relationships, media))
         elif tag == "tbl":
-            blocks.append(_build_table(child, styles, relationships, media))
+            blocks.append(_build_table(child, styles, relationships, media, table_styles))
     return blocks
 
 
@@ -395,21 +403,43 @@ def _build_table(
     styles: dict,
     relationships: dict,
     media: dict,
+    table_styles: dict | None = None,
 ) -> dict:
     column_widths = _parse_column_widths(table)
-    tbl_borders = _extract_tbl_borders(table)
-    rows = _build_table_rows(table, styles, relationships, media)
-    return {"type": "table", "column_widths_twips": column_widths, "tbl_borders": tbl_borders, "rows": rows}
 
-
-def _extract_tbl_borders(table: ET.Element) -> dict:
     tbl_pr = table.find(f"{W_NS}tblPr")
-    if tbl_pr is None:
-        return {}
+    tbl_style_id: Optional[str] = None
+    if tbl_pr is not None:
+        ts_elem = tbl_pr.find(f"{W_NS}tblStyle")
+        if ts_elem is not None:
+            tbl_style_id = ts_elem.get(f"{W_NS}val")
+
+    resolved = _resolve_tbl_style(tbl_style_id, table_styles or {})
+    # Direct tblBorders on the element override style defaults
+    tbl_borders = dict(resolved.get("borders", {}))
+    tbl_cell_margins = dict(resolved.get("cell_margins", {}))
+    if tbl_pr is not None:
+        direct_b = _parse_tbl_borders_elem(tbl_pr)
+        tbl_borders.update(direct_b)
+        direct_m = _parse_tbl_cell_margins_elem(tbl_pr)
+        tbl_cell_margins.update(direct_m)
+
+    rows = _build_table_rows(table, styles, relationships, media, table_styles)
+    return {
+        "type": "table",
+        "column_widths_twips": column_widths,
+        "tbl_borders": tbl_borders,
+        "tbl_cell_margins": tbl_cell_margins,
+        "rows": rows,
+    }
+
+
+def _parse_tbl_borders_elem(tbl_pr: ET.Element) -> dict:
+    """Extract tblBorders from a tblPr element."""
+    result: dict = {}
     borders_elem = tbl_pr.find(f"{W_NS}tblBorders")
     if borders_elem is None:
-        return {}
-    result: dict = {}
+        return result
     for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
         b = borders_elem.find(f"{W_NS}{edge}")
         if b is None:
@@ -425,6 +455,65 @@ def _extract_tbl_borders(table: ET.Element) -> dict:
             "color": color.upper() if color and color.upper() != "AUTO" else "000000",
         }
     return result
+
+
+def _parse_tbl_cell_margins_elem(tbl_pr: ET.Element) -> dict:
+    """Extract tblCellMar default cell margins (twips) from a tblPr element."""
+    result: dict = {}
+    tcmar = tbl_pr.find(f"{W_NS}tblCellMar")
+    if tcmar is None:
+        return result
+    for edge in ("top", "left", "bottom", "right"):
+        ee = tcmar.find(f"{W_NS}{edge}")
+        if ee is not None:
+            w_val = ee.get(f"{W_NS}w") or ee.get("w")
+            if w_val:
+                try:
+                    result[edge] = int(w_val)
+                except ValueError:
+                    pass
+    return result
+
+
+def _parse_table_styles(styles_root: ET.Element) -> dict:
+    """Parse table styles from styles.xml into {styleId: {based_on, borders, cell_margins}}."""
+    raw: dict = {}
+    for style in styles_root.findall(f"{W_NS}style"):
+        if style.get(f"{W_NS}type") != "table":
+            continue
+        sid = style.get(f"{W_NS}styleId")
+        if not sid:
+            continue
+        based = style.find(f"{W_NS}basedOn")
+        based_on = based.get(f"{W_NS}val") if based is not None else None
+        tbl_pr = style.find(f"{W_NS}tblPr")
+        borders: dict = {}
+        cell_margins: dict = {}
+        if tbl_pr is not None:
+            borders = _parse_tbl_borders_elem(tbl_pr)
+            cell_margins = _parse_tbl_cell_margins_elem(tbl_pr)
+        raw[sid] = {"based_on": based_on, "borders": borders, "cell_margins": cell_margins}
+    return raw
+
+
+def _resolve_tbl_style(style_id: Optional[str], table_styles: dict) -> dict:
+    """Walk basedOn chain and return merged {borders, cell_margins}."""
+    chain: list[dict] = []
+    visited: set[str] = set()
+    current = style_id
+    while current and current not in visited:
+        visited.add(current)
+        entry = table_styles.get(current)
+        if entry is None:
+            break
+        chain.append(entry)
+        current = entry.get("based_on")
+    borders: dict = {}
+    cell_margins: dict = {}
+    for entry in reversed(chain):
+        borders = {**borders, **entry.get("borders", {})}
+        cell_margins = {**cell_margins, **entry.get("cell_margins", {})}
+    return {"borders": borders, "cell_margins": cell_margins}
 
 
 def _parse_column_widths(table: ET.Element) -> list:
@@ -449,6 +538,7 @@ def _build_table_rows(
     styles: dict,
     relationships: dict,
     media: dict,
+    table_styles: dict | None = None,
 ) -> list[dict]:
     # First pass: collect raw cell data with vmerge tracking
     raw_rows: list[list[dict]] = []
@@ -460,7 +550,7 @@ def _build_table_rows(
             vmerge = _parse_cell_vmerge(cell)
             width_twips = _parse_cell_width_twips(cell)
             cell_style = _extract_cell_style(cell)
-            children = _build_blocks(cell, styles, relationships, media)
+            children = _build_blocks(cell, styles, relationships, media, table_styles)
             entries.append({
                 "_col": current_col,
                 "colspan": colspan,

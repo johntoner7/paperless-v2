@@ -346,8 +346,9 @@ def _render_table(node: dict, ann: Optional[dict] = None) -> str:
     if ann_css:
         table_style += " " + ann_css
     tbl_borders = node.get("tbl_borders") or {}
+    tbl_cell_margins = node.get("tbl_cell_margins") or {}
     colgroup = _render_colgroup(node.get("column_widths_twips", []))
-    rows = "".join(_render_row(r, tbl_borders) for r in node.get("rows", []))
+    rows = "".join(_render_row(r, tbl_borders, tbl_cell_margins) for r in node.get("rows", []))
     return f'<table style="{table_style}">{colgroup}{rows}</table>'
 
 
@@ -368,19 +369,18 @@ def _render_colgroup(widths: list) -> str:
     return f"<colgroup>{''.join(cols)}</colgroup>"
 
 
-def _render_row(row: dict, tbl_borders: dict) -> str:
-    return "<tr>" + "".join(_render_cell(c, tbl_borders) for c in row.get("cells", [])) + "</tr>"
+def _render_row(row: dict, tbl_borders: dict, tbl_cell_margins: dict | None = None) -> str:
+    return "<tr>" + "".join(_render_cell(c, tbl_borders, tbl_cell_margins) for c in row.get("cells", [])) + "</tr>"
 
 
-def _render_cell(cell: dict, tbl_borders: Optional[dict] = None) -> str:
+def _render_cell(cell: dict, tbl_borders: Optional[dict] = None, tbl_cell_margins: Optional[dict] = None) -> str:
     attrs: list[str] = []
     if cell.get("colspan", 1) > 1:
         attrs.append(f'colspan="{cell["colspan"]}"')
     if cell.get("rowspan", 1) > 1:
         attrs.append(f'rowspan="{cell["rowspan"]}"')
 
-    # 3.2 — cell alignment CSS
-    css = _cell_css(cell.get("style", {}), tbl_borders or {})
+    css = _cell_css(cell.get("style", {}), tbl_borders or {}, tbl_cell_margins or {})
     if css:
         attrs.append(f'style="{css}"')
 
@@ -389,14 +389,24 @@ def _render_cell(cell: dict, tbl_borders: Optional[dict] = None) -> str:
     return f"<td{attr_str}>{inner}</td>"
 
 
-def _cell_css(style: dict, tbl_borders: Optional[dict] = None) -> str:
-    parts: list[str] = ["padding: 4pt", "vertical-align: top", "overflow-wrap: break-word"]
+def _cell_css(style: dict, tbl_borders: Optional[dict] = None, tbl_cell_margins: Optional[dict] = None) -> str:
+    parts: list[str] = []
+
+    # Padding: prefer cell-level tcMar, then table-style default, then fallback
+    tbl_cell_margins = tbl_cell_margins or {}
+    if tbl_cell_margins:
+        top_px    = _twips_to_px(tbl_cell_margins.get("top",    0)) or 0
+        right_px  = _twips_to_px(tbl_cell_margins.get("right",  0)) or 0
+        bottom_px = _twips_to_px(tbl_cell_margins.get("bottom", 0)) or 0
+        left_px   = _twips_to_px(tbl_cell_margins.get("left",   0)) or 0
+        parts.append(f"padding: {top_px}px {right_px}px {bottom_px}px {left_px}px")
+    else:
+        parts.append("padding: 4pt")
 
     va = style.get("vertical_align")
-    if va:
-        # Override default; DOCX "center" maps to CSS "middle" for table cells
-        css_va = "middle" if va == "center" else va
-        parts[-1] = f"vertical-align: {css_va}"
+    css_va = "middle" if va == "center" else (va or "top")
+    parts.append(f"vertical-align: {css_va}")
+    parts.append("overflow-wrap: break-word")
 
     align = style.get("alignment")
     if align:
@@ -412,11 +422,9 @@ def _cell_css(style: dict, tbl_borders: Optional[dict] = None) -> str:
     tbl_borders = tbl_borders or {}
     _TBL_EDGE = {"top": "insideH", "bottom": "insideH", "left": "insideV", "right": "insideV"}
     for edge in ("top", "left", "bottom", "right"):
-        b = cell_borders.get(edge) or tbl_borders.get(_TBL_EDGE[edge])
+        b = cell_borders.get(edge) or tbl_borders.get(_TBL_EDGE[edge]) or tbl_borders.get(edge)
         if b:
-            parts.append(
-                f"border-{edge}: {b['width_pt']}pt {b['style']} #{b['color']}"
-            )
+            parts.append(f"border-{edge}: {b['width_pt']}pt {b['style']} #{b['color']}")
 
     return "; ".join(parts)
 
