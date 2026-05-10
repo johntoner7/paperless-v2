@@ -113,21 +113,24 @@
   flex-shrink: 0;
 }
 
-/* On mobile: show preview of full document at reduced scale, allow zoom */
+.document-pane .editor-prose {
+  min-height: auto;
+  padding: 2rem;
+  background: white;
+  flex-shrink: 0;
+}
+
+/* On mobile: ensure document maintains readable size with horizontal scroll */
 @media (max-width: 640px) {
   .document-pane {
     padding: 0.5rem;
   }
   
-  .document-pane > div {
+  /* For preview panes: show at reduced scale */
+  .document-pane .docx-wrapper {
     transform: scale(0.65);
     transform-origin: top center;
     transition: transform 150ms ease;
-  }
-  
-  /* Allow user to interact at original scale when pinch-zoomed */
-  .document-pane > div:active {
-    transform: scale(0.65);
   }
 }
 

@@ -71,7 +71,7 @@ function DocxPane({ url }: { url: string }) {
   }, [url]);
 
   return (
-    <div className="h-full overflow-y-auto bg-[#f0f0f0] p-4">
+    <div className="document-pane h-full">
       {loading && (
         <div className="flex items-center justify-center h-40 text-sm text-muted-foreground">
           Rendering original document…
@@ -436,7 +436,7 @@ export default function DocumentWorkbench() {
             {isReady && <Badge variant="outline" className="ml-auto text-[10px] text-muted-foreground">editable</Badge>}
           </div>
 
-          <div className="flex-1 overflow-y-auto">
+          <div className="flex-1 overflow-hidden">
             {!isReady && !htmlDraft ? (
               <div className="flex flex-col items-center justify-center h-full gap-3 text-center p-8">
                 <div className="rounded-full bg-muted p-4">
@@ -447,14 +447,16 @@ export default function DocumentWorkbench() {
                 </p>
               </div>
             ) : (
-              <HtmlEditor
-                key={docTitle}
-                initialHtml={htmlDraft}
-                onChange={h => {
-                  setHtmlDraft(h);
-                  localStorage.setItem(draftKey, h);
-                }}
-              />
+              <div className="document-pane h-full">
+                <HtmlEditor
+                  key={docTitle}
+                  initialHtml={htmlDraft}
+                  onChange={h => {
+                    setHtmlDraft(h);
+                    localStorage.setItem(draftKey, h);
+                  }}
+                />
+              </div>
             )}
           </div>
         </div>
