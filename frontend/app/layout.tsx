@@ -2,7 +2,7 @@ import type { Metadata, Viewport } from 'next';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'Paperless BE Lab',
+  title: 'Docx to HTML',
   description: 'Upload DOCX files, convert to HTML, edit, save, and export to PDF.',
 };
 
