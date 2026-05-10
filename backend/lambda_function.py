@@ -3,6 +3,7 @@ import subprocess
 import tempfile
 import boto3
 import logging
+import json
 from urllib.parse import unquote_plus
 
 LOG = logging.getLogger('lambda')
@@ -16,10 +17,14 @@ def download_s3(bucket, key, dest_path):
 def upload_s3(path, bucket, key):
     s3.upload_file(path, bucket, key)
 
-def run_renderer(input_path, output_path):
+def run_renderer(input_path, output_path, use_ai=False):
     # Prefer calling the existing docx_renderer.py if it handles HTML output
     if os.path.exists('/var/task/docx_renderer.py'):
-        subprocess.check_call(['python3', '/var/task/docx_renderer.py', input_path, output_path])
+        # Build args for renderer with optional AI flag
+        args = ['python3', '/var/task/docx_renderer.py', input_path, output_path]
+        if use_ai:
+            args.append('--use-ai')
+        subprocess.check_call(args)
     else:
         # Fallback: use libreoffice to convert to PDF
         subprocess.check_call(['soffice', '--headless', '--convert-to', 'pdf', '--outdir', os.path.dirname(output_path), input_path])
@@ -28,10 +33,12 @@ def make_presigned_url(bucket, key, expires=3600):
     return s3.generate_presigned_url('get_object', Params={'Bucket': bucket, 'Key': key}, ExpiresIn=expires)
 
 def lambda_handler(event, context):
-    # Expect event: {"bucket": "my-bucket", "key": "path/to/file.docx"}
+    # Expect event: {"bucket": "my-bucket", "key": "path/to/file.docx", "useAI": true}
     LOG.info('Event: %s', event)
     bucket = event.get('bucket') or event.get('Records', [{}])[0].get('s3', {}).get('bucket', {}).get('name')
     key = event.get('key') or event.get('Records', [{}])[0].get('s3', {}).get('object', {}).get('key')
+    use_ai = event.get('useAI', False)
+    
     if not bucket or not key:
         raise ValueError('Missing bucket or key in event')
     key = unquote_plus(key)
@@ -47,7 +54,7 @@ def lambda_handler(event, context):
         out = os.path.join(tmp, base + '.html')
         download_s3(bucket, key, inp)
         try:
-            run_renderer(inp, out)
+            run_renderer(inp, out, use_ai=use_ai)
         except subprocess.CalledProcessError:
             # try LibreOffice PDF fallback
             LOG.exception('Renderer failed; attempting LibreOffice PDF fallback')

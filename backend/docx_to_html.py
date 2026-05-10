@@ -833,25 +833,38 @@ def _merge_dicts(base: dict, override: dict) -> dict:
     return result
 
 
-def _parse_numbering(numbering_root: ET.Element) -> Dict[str, Dict[int, str]]:
-    abstract: Dict[str, Dict[int, str]] = {}
+def _parse_numbering(numbering_root: ET.Element) -> Dict[str, Dict[int, dict]]:
+    """Parse word/numbering.xml into {numId: {ilvl: {numFmt, lvlText, start}}}."""
+    abstract: Dict[str, Dict[int, dict]] = {}
     for an in numbering_root.findall(f"{W_NS}abstractNum"):
         aid = an.get(f"{W_NS}abstractNumId")
         if aid is None:
             continue
-        levels: Dict[int, str] = {}
+        levels: Dict[int, dict] = {}
         for lvl in an.findall(f"{W_NS}lvl"):
             ilvl_val = lvl.get(f"{W_NS}ilvl")
+            if ilvl_val is None:
+                continue
             nf = lvl.find(f"{W_NS}numFmt")
-            if ilvl_val is not None and nf is not None:
-                fmt = nf.get(f"{W_NS}val") or nf.get("val") or "bullet"
+            fmt = (nf.get(f"{W_NS}val") or nf.get("val") or "bullet") if nf is not None else "bullet"
+            lvl_text_elem = lvl.find(f"{W_NS}lvlText")
+            lvl_text = ""
+            if lvl_text_elem is not None:
+                lvl_text = lvl_text_elem.get(f"{W_NS}val") or lvl_text_elem.get("val") or ""
+            start_elem = lvl.find(f"{W_NS}start")
+            start = 1
+            if start_elem is not None:
                 try:
-                    levels[int(ilvl_val)] = fmt
-                except ValueError:
+                    start = int(start_elem.get(f"{W_NS}val") or start_elem.get("val") or 1)
+                except (ValueError, TypeError):
                     pass
+            try:
+                levels[int(ilvl_val)] = {"numFmt": fmt, "lvlText": lvl_text, "start": start}
+            except ValueError:
+                pass
         abstract[aid] = levels
 
-    result: Dict[str, Dict[int, str]] = {}
+    result: Dict[str, Dict[int, dict]] = {}
     for num in numbering_root.findall(f"{W_NS}num"):
         nid = num.get(f"{W_NS}numId")
         aid_elem = num.find(f"{W_NS}abstractNumId")
@@ -859,6 +872,62 @@ def _parse_numbering(numbering_root: ET.Element) -> Dict[str, Dict[int, str]]:
             aid = aid_elem.get(f"{W_NS}val")
             result[nid] = abstract.get(aid or "", {})
     return result
+
+
+def _get_list_tag(numbering: Dict[str, Dict[int, dict]], num_id: str, ilvl: int) -> str:
+    level = numbering.get(num_id, {}).get(ilvl, {})
+    fmt = level.get("numFmt", "bullet") if isinstance(level, dict) else "bullet"
+    return "ol" if fmt in ORDERED_NUM_FMTS else "ul"
+
+
+_BULLET_CHAR_TO_CSS: Dict[str, str] = {
+    "\u2022": "disc",    # bullet
+    "\u2023": "disc",    # triangular bullet
+    "\u25e6": "circle",  # white bullet
+    "\u25cb": "circle",  # white circle
+    "\u25aa": "square",  # black small square
+    "\u25a0": "square",  # black square
+    "\u25cf": "disc",    # black circle
+}
+
+_NUM_FMT_TO_CSS: Dict[str, str] = {
+    "decimal":               "decimal",
+    "upperRoman":            "upper-roman",
+    "lowerRoman":            "lower-roman",
+    "upperLetter":           "upper-alpha",
+    "lowerLetter":           "lower-alpha",
+    "decimalZero":           "decimal-leading-zero",
+    "decimalEnclosedCircle": "decimal",
+    "ordinal":               "decimal",
+}
+
+
+def _list_style_css(numbering: Dict[str, Dict[int, dict]], num_id: str, ilvl: int) -> str:
+    """Return inline CSS for the list marker type."""
+    level = numbering.get(num_id, {}).get(ilvl)
+    if not isinstance(level, dict):
+        return ""
+    fmt = level.get("numFmt", "bullet")
+    lvl_text = level.get("lvlText", "")
+    start = level.get("start", 1)
+
+    if fmt in _NUM_FMT_TO_CSS:
+        css = f"list-style-type: {_NUM_FMT_TO_CSS[fmt]};"
+        if start != 1:
+            css += f" counter-reset: list-item {start - 1};"
+        return css
+
+    if fmt == "bullet":
+        # Map bullet character (by codepoint) to CSS keyword
+        char_map = {
+            "•": "disc", "‣": "disc", "●": "disc",
+            "◦": "circle", "○": "circle",
+            "▪": "square", "■": "square", "◾": "square",
+        }
+        css_type = char_map.get(lvl_text, "disc")
+        return f"list-style-type: {css_type};"
+
+    return ""
 
 
 def _get_num_props(paragraph: ET.Element) -> tuple[Optional[str], int]:
@@ -1015,7 +1084,9 @@ def _render_section_blocks(
             result.append(f"</{list_stack.pop()['tag']}>")
 
     def open_list(num_id: str, ilvl: int, list_tag: str) -> None:
-        result.append(f"<{list_tag}>")
+        marker_css = _list_style_css(numbering, num_id, ilvl)
+        style_attr = f' style="{marker_css}"' if marker_css else ""
+        result.append(f"<{list_tag}{style_attr}>")
         list_stack.append({"tag": list_tag, "num_id": num_id, "ilvl": ilvl})
 
     for child in elements:
@@ -1313,31 +1384,41 @@ def _render_inline(
     prefix = []
     suffix = []
     run_properties = node.find(f"{W_NS}rPr")
-    run_style = {}
-    if run_properties is not None:
-        if run_properties.find(f"{W_NS}b") is not None:
-            prefix.append("<strong>")
-            suffix.insert(0, "</strong>")
-        if run_properties.find(f"{W_NS}i") is not None:
-            prefix.append("<em>")
-            suffix.insert(0, "</em>")
-        if run_properties.find(f"{W_NS}u") is not None:
-            prefix.append("<u>")
-            suffix.insert(0, "</u>")
-        if run_properties.find(f"{W_NS}strike") is not None:
-            prefix.append("<s>")
-            suffix.insert(0, "</s>")
-        vert_align = run_properties.find(f"{W_NS}vertAlign")
-        if vert_align is not None:
-            v = vert_align.get(f"{W_NS}val") or vert_align.get("val", "")
-            if v == "superscript":
-                prefix.append("<sup>")
-                suffix.insert(0, "</sup>")
-            elif v == "subscript":
-                prefix.append("<sub>")
-                suffix.insert(0, "</sub>")
 
-        run_style = _extract_run_style(run_properties)
+    # Resolve character style (w:rStyle) then overlay direct run properties
+    char_style_r: dict = {}
+    if run_properties is not None:
+        rStyle_elem = run_properties.find(f"{W_NS}rStyle")
+        if rStyle_elem is not None:
+            char_style_id = rStyle_elem.get(f"{W_NS}val")
+            if char_style_id:
+                resolved = _resolve_style(char_style_id, styles)
+                char_style_r = resolved.get("r_style", {})
+
+    direct_run_style = _extract_run_style(run_properties) if run_properties is not None else {}
+    # Merge: character style as base, direct properties override
+    run_style = _merge_dicts(char_style_r, direct_run_style)
+
+    # Apply semantic tags from merged run style (catches style-inherited bold/italic/etc.)
+    if run_style.get("bold"):
+        prefix.append("<strong>")
+        suffix.insert(0, "</strong>")
+    if run_style.get("italic"):
+        prefix.append("<em>")
+        suffix.insert(0, "</em>")
+    if run_style.get("underline"):
+        prefix.append("<u>")
+        suffix.insert(0, "</u>")
+    if run_style.get("strike"):
+        prefix.append("<s>")
+        suffix.insert(0, "</s>")
+    vert = run_style.get("vertical_align")
+    if vert == "superscript":
+        prefix.append("<sup>")
+        suffix.insert(0, "</sup>")
+    elif vert == "subscript":
+        prefix.append("<sub>")
+        suffix.insert(0, "</sub>")
 
     parts = []
     for child in node:

@@ -536,8 +536,12 @@ if __name__ == "__main__":
     import sys
     from docx_ast import build_docx_ast
 
+    use_ai = "--use-ai" in sys.argv
+    if use_ai:
+        sys.argv.remove("--use-ai")
+
     if len(sys.argv) < 2:
-        print("Usage: python docx_renderer.py input.docx [output.html] [annotations.json]", file=sys.stderr)
+        print("Usage: python docx_renderer.py input.docx [output.html] [--use-ai]", file=sys.stderr)
         sys.exit(2)
 
     try:
@@ -547,10 +551,21 @@ if __name__ == "__main__":
         sys.exit(1)
 
     annotations: Optional[dict] = None
-    ann_path = sys.argv[3] if len(sys.argv) > 3 else None
-    if ann_path:
-        with open(ann_path, encoding="utf-8") as fh:
-            annotations = json.load(fh)
+    
+    # If --use-ai flag is set, generate annotations using Claude
+    if use_ai:
+        try:
+            from docx_annotator import generate_annotations
+            annotations = generate_annotations(ast)
+            print(f"[docx_renderer] AI annotations generated", file=sys.stderr)
+        except Exception as exc:
+            print(f"[docx_renderer] Warning: AI annotation failed ({exc}), continuing without annotations", file=sys.stderr)
+    else:
+        # Otherwise, check for annotations file as third arg
+        ann_path = sys.argv[3] if len(sys.argv) > 3 else None
+        if ann_path:
+            with open(ann_path, encoding="utf-8") as fh:
+                annotations = json.load(fh)
 
     rendered = render_ast_to_html(ast, annotations)
     report = validate_ast_html(ast, rendered)

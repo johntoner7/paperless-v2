@@ -119,6 +119,7 @@ export default function DocumentWorkbench() {
   const [docxSource, setDocxSource] = useState<string | null>(null);
   const [showCompare, setShowCompare] = useState(false);
   const [libraryOpen, setLibraryOpen] = useState(false);
+  const [useAI, setUseAI] = useState(false);
   const skipRestoreRef = useRef(false);
 
   const draftKey = useMemo(() => `pb:draft:${docTitle}`, [docTitle]);
@@ -173,7 +174,20 @@ export default function DocumentWorkbench() {
         headers: { 'Content-Type': sourceFile.type || 'application/octet-stream' },
       });
       if (!up.ok) throw new Error(`Upload failed: ${up.status}`);
+      
+      // Invoke conversion with AI flag if enabled
       setMessage('Converting…');
+      if (useAI) {
+        const convResp = await fetch(PRESIGN_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'convert', key, useAI: true }),
+        });
+        if (!convResp.ok) {
+          console.warn('Failed to invoke AI conversion, will rely on S3 events');
+        }
+      }
+      
       for (let i = 0; i < 60; i++) {
         const result = await pollResult(key);
         if (result?.status === 'ready' && result.resultUrl) {
@@ -312,6 +326,16 @@ export default function DocumentWorkbench() {
           <span className="max-w-[160px] truncate">{sourceFile ? sourceFile.name : 'Choose DOCX'}</span>
         </label>
         <input id="docx-upload" type="file" accept=".docx" className="sr-only" onChange={handleFileChange} />
+
+        <label className="inline-flex items-center gap-2 h-8 px-3 rounded-md border border-input bg-background text-sm cursor-pointer hover:bg-accent transition-colors">
+          <input
+            type="checkbox"
+            checked={useAI}
+            onChange={(e) => setUseAI(e.target.checked)}
+            className="w-4 h-4 rounded"
+          />
+          <span className="text-muted-foreground">AI Annotations</span>
+        </label>
 
         <Button
           size="sm"

@@ -8,11 +8,13 @@ from botocore.exceptions import ClientError
 _region = os.environ.get('AWS_DEFAULT_REGION', 'eu-west-1')
 s3 = boto3.client('s3', region_name=_region,
                   endpoint_url=f'https://s3.{_region}.amazonaws.com')
+lambda_client = boto3.client('lambda', region_name=_region)
 
 BUCKET = os.environ.get('PRESIGN_BUCKET')
 if not BUCKET:
     raise RuntimeError('PRESIGN_BUCKET environment variable must be set')
 
+LAMBDA_FUNCTION = os.environ.get('RENDERER_LAMBDA_FUNCTION', 'paperless-renderer')
 URL_EXPIRATION = int(os.environ.get('PRESIGN_EXPIRATION', '300'))
 
 
@@ -97,6 +99,35 @@ def lambda_handler(event, context):
 
         if method == 'GET' and action == 'list':
             return make_response(200, {'items': list_uploaded_files()})
+
+        if method == 'POST' and action == 'convert':
+            # Invoke the renderer Lambda with useAI flag
+            # Expect body: {"key": "uploads/uuid/file.docx", "useAI": true}
+            body = event.get('body') or ''
+            if event.get('isBase64Encoded'):
+                import base64
+                body = base64.b64decode(body).decode('utf-8')
+            payload = json.loads(body)
+            key = payload.get('key')
+            use_ai = payload.get('useAI', False)
+            
+            if not key:
+                return make_response(400, {'error': 'key is required'})
+            
+            try:
+                invoke_payload = {
+                    'bucket': BUCKET,
+                    'key': key,
+                    'useAI': use_ai,
+                }
+                response = lambda_client.invoke(
+                    FunctionName=LAMBDA_FUNCTION,
+                    InvocationType='Event',  # Async invocation
+                    Payload=json.dumps(invoke_payload),
+                )
+                return make_response(202, {'status': 'conversion_started', 'key': key})
+            except Exception as e:
+                return make_response(500, {'error': f'Failed to invoke renderer: {str(e)}'})
 
         if method == 'POST':
             # expect JSON body with fileName and optional contentType
