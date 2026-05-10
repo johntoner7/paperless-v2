@@ -633,6 +633,77 @@ def _extract_cell_style(cell: ET.Element) -> dict:
         if margins:
             result["margins"] = margins
 
+    # Per-cell borders (w:tcBorders) — mark as explicit so table-style defaults aren't applied
+    tcborders = tcpr.find(f"{W_NS}tcBorders")
+    if tcborders is not None:
+        cell_borders: dict = {}
+        for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
+            b = tcborders.find(f"{W_NS}{edge}")
+            if b is None:
+                continue
+            val = b.get(f"{W_NS}val") or b.get("val", "")
+            if val in ("none", "nil", ""):
+                cell_borders[edge] = None
+                continue
+            sz = b.get(f"{W_NS}sz") or b.get("sz")
+            color = b.get(f"{W_NS}color") or b.get("color", "auto")
+            try:
+                width_pt = round(int(sz) / 8, 2) if sz else 0.5
+            except (ValueError, TypeError):
+                width_pt = 0.5
+            cell_borders[edge] = {
+                "style": "double" if val == "double" else "solid",
+                "width_pt": width_pt,
+                "color": "000000" if (not color or color.upper() == "AUTO") else color.upper(),
+            }
+        if cell_borders:
+            result["borders"] = cell_borders
+
+    return result
+
+
+def _extract_tbl_borders(tbl_pr_elem: ET.Element) -> dict:
+    """Extract tblBorders from a tblPr element into a dict keyed by edge name."""
+    result: dict = {}
+    tbl_borders = tbl_pr_elem.find(f"{W_NS}tblBorders")
+    if tbl_borders is None:
+        return result
+    for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
+        b = tbl_borders.find(f"{W_NS}{edge}")
+        if b is None:
+            continue
+        val = b.get(f"{W_NS}val") or b.get("val", "")
+        if val in ("none", "nil", ""):
+            continue
+        sz = b.get(f"{W_NS}sz") or b.get("sz")
+        color = b.get(f"{W_NS}color") or b.get("color", "auto")
+        try:
+            width_pt = round(int(sz) / 8, 2) if sz else 0.5
+        except (ValueError, TypeError):
+            width_pt = 0.5
+        result[edge] = {
+            "style": "double" if val == "double" else "solid",
+            "width_pt": width_pt,
+            "color": "000000" if (not color or color.upper() == "AUTO") else color.upper(),
+        }
+    return result
+
+
+def _extract_tbl_cell_margins(tbl_pr_elem: ET.Element) -> dict:
+    """Extract tblCellMar default cell margins from a tblPr element (twips)."""
+    result: dict = {}
+    tcmar = tbl_pr_elem.find(f"{W_NS}tblCellMar")
+    if tcmar is None:
+        return result
+    for edge in ("top", "left", "bottom", "right"):
+        edge_elem = tcmar.find(f"{W_NS}{edge}")
+        if edge_elem is not None:
+            w_val = edge_elem.get(f"{W_NS}w") or edge_elem.get("w")
+            if w_val:
+                try:
+                    result[edge] = int(w_val)
+                except ValueError:
+                    pass
     return result
 
 
@@ -769,6 +840,29 @@ def _cell_style_to_css(cstyle: dict) -> str:
         bottom = _twips_to_px(str(margins.get("bottom", 0))) or 0
         left   = _twips_to_px(str(margins.get("left",   0))) or 0
         parts.append(f"padding: {top}px {right}px {bottom}px {left}px;")
+    # Per-cell explicit borders take precedence; table_borders fills in when absent
+    explicit_borders = cstyle.get("borders") or {}
+    table_borders = cstyle.get("table_borders") or {}
+    for css_edge, pref_edges in [
+        ("top",    ["top",   "insideH"]),
+        ("bottom", ["bottom", "insideH"]),
+        ("left",   ["left",  "insideV"]),
+        ("right",  ["right", "insideV"]),
+    ]:
+        b = explicit_borders.get(css_edge)
+        if b is None and not explicit_borders:
+            for tbl_edge in pref_edges:
+                b = table_borders.get(tbl_edge)
+                if b is not None:
+                    break
+        if b:
+            w = b.get("width_pt", 0.5)
+            s = b.get("style", "solid")
+            c = b.get("color", "000000")
+            col = c if c.startswith("#") else f"#{c}"
+            parts.append(f"border-{css_edge}: {w}pt {s} {col};")
+        elif b is None and explicit_borders.get(css_edge) is None and not table_borders:
+            pass  # no border info, leave to stylesheet default
     return " ".join(parts)
 
 
@@ -786,17 +880,28 @@ def _parse_styles(styles_root: ET.Element) -> Dict[str, dict]:
         based_on = based_on_elem.get(f"{W_NS}val") if based_on_elem is not None else None
         p_style: dict = {}
         r_style: dict = {}
+        tbl_style: dict = {}
         if style_type == "paragraph":
             p_style = _extract_paragraph_style(style)
         rpr = style.find(f"{W_NS}rPr")
         if rpr is not None:
             r_style = _extract_run_style(rpr)
+        if style_type == "table":
+            tbl_pr = style.find(f"{W_NS}tblPr")
+            if tbl_pr is not None:
+                borders = _extract_tbl_borders(tbl_pr)
+                cell_margins = _extract_tbl_cell_margins(tbl_pr)
+                if borders:
+                    tbl_style["borders"] = borders
+                if cell_margins:
+                    tbl_style["cell_margins"] = cell_margins
         styles[style_id] = {
             "name": name,
             "type": style_type,
             "based_on": based_on,
             "p_style": p_style,
             "r_style": r_style,
+            "tbl_style": tbl_style,
         }
     return styles
 
@@ -820,6 +925,25 @@ def _resolve_style(style_id: Optional[str], styles: Dict[str, dict]) -> dict:
         p_style = _merge_dicts(p_style, entry.get("p_style", {}))
         r_style = {**r_style, **entry.get("r_style", {})}
     return {"p_style": p_style, "r_style": r_style}
+
+
+def _resolve_table_style(style_id: Optional[str], styles: Dict[str, dict]) -> dict:
+    """Walk the basedOn chain for a table style and return merged tbl_style dict."""
+    chain: list[dict] = []
+    visited: set[str] = set()
+    current = style_id
+    while current and current not in visited:
+        visited.add(current)
+        entry = styles.get(current)
+        if entry is None:
+            break
+        chain.append(entry)
+        current = entry.get("based_on")
+
+    tbl_style: dict = {}
+    for entry in reversed(chain):
+        tbl_style = _merge_dicts(tbl_style, entry.get("tbl_style", {}))
+    return tbl_style
 
 
 def _merge_dicts(base: dict, override: dict) -> dict:
@@ -1205,8 +1329,25 @@ def _render_table(
     assets_dir: Optional[Path] = None,
     footnote_collector: Optional[Dict] = None,
 ) -> str:
+    # Resolve table style for default borders and cell margins
+    tbl_pr = table.find(f"{W_NS}tblPr")
+    table_style_id = None
+    if tbl_pr is not None:
+        tbl_style_elem = tbl_pr.find(f"{W_NS}tblStyle")
+        if tbl_style_elem is not None:
+            table_style_id = tbl_style_elem.get(f"{W_NS}val")
+    resolved_tbl_style = _resolve_table_style(table_style_id, styles)
+    # Direct tblBorders/tblCellMar on the table element override style defaults
+    if tbl_pr is not None:
+        direct_borders = _extract_tbl_borders(tbl_pr)
+        direct_margins = _extract_tbl_cell_margins(tbl_pr)
+        if direct_borders:
+            resolved_tbl_style = _merge_dicts(resolved_tbl_style, {"borders": direct_borders})
+        if direct_margins:
+            resolved_tbl_style = _merge_dicts(resolved_tbl_style, {"cell_margins": direct_margins})
+
     column_widths = _parse_table_column_widths(table)
-    logical_rows = _build_table_rows(table, styles, relationships, media, assets_dir, footnote_collector)
+    logical_rows = _build_table_rows(table, styles, relationships, media, assets_dir, footnote_collector, resolved_tbl_style)
     rows = []
     for row_entries in logical_rows:
         cells = []
@@ -1263,7 +1404,10 @@ def _build_table_rows(
     media: Dict[str, bytes],
     assets_dir: Optional[Path] = None,
     footnote_collector: Optional[Dict] = None,
+    resolved_tbl_style: Optional[dict] = None,
 ) -> list[list[dict[str, object]]]:
+    if resolved_tbl_style is None:
+        resolved_tbl_style = {}
     row_cells: list[list[dict[str, object]]] = []
     for row_index, row in enumerate(table.findall(f"{W_NS}tr")):
         entries = []
@@ -1285,6 +1429,11 @@ def _build_table_rows(
                     cell_blocks.append(rendered)
 
             cell_style = _extract_cell_style(cell)
+            # Apply table-style defaults when cell has no explicit overrides
+            if "margins" not in cell_style and resolved_tbl_style.get("cell_margins"):
+                cell_style["margins"] = resolved_tbl_style["cell_margins"]
+            if "borders" not in cell_style and resolved_tbl_style.get("borders"):
+                cell_style["table_borders"] = resolved_tbl_style["borders"]
 
             entries.append(
                 {
