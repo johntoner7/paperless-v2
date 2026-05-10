@@ -633,6 +633,13 @@ def _extract_cell_style(cell: ET.Element) -> dict:
         if margins:
             result["margins"] = margins
 
+    # Cell shading / background (w:shd)
+    shd = tcpr.find(f"{W_NS}shd")
+    if shd is not None:
+        fill = shd.get(f"{W_NS}fill") or shd.get("fill")
+        if fill and fill.upper() not in ("AUTO", ""):
+            result["background"] = fill.upper()
+
     # Per-cell borders (w:tcBorders) — mark as explicit so table-style defaults aren't applied
     tcborders = tcpr.find(f"{W_NS}tcBorders")
     if tcborders is not None:
@@ -659,6 +666,40 @@ def _extract_cell_style(cell: ET.Element) -> dict:
         if cell_borders:
             result["borders"] = cell_borders
 
+    return result
+
+
+def _extract_cell_props_from_tcpr(tcpr: ET.Element) -> dict:
+    """Extract background and borders from a bare tcPr element (e.g. inside tblStylePr)."""
+    result: dict = {}
+    shd = tcpr.find(f"{W_NS}shd")
+    if shd is not None:
+        fill = shd.get(f"{W_NS}fill") or shd.get("fill")
+        if fill and fill.upper() not in ("AUTO", ""):
+            result["background"] = fill.upper()
+    tcborders = tcpr.find(f"{W_NS}tcBorders")
+    if tcborders is not None:
+        borders: dict = {}
+        for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
+            b = tcborders.find(f"{W_NS}{edge}")
+            if b is None:
+                continue
+            val = b.get(f"{W_NS}val") or b.get("val", "")
+            if val in ("none", "nil", ""):
+                continue
+            sz = b.get(f"{W_NS}sz") or b.get("sz")
+            color = b.get(f"{W_NS}color") or b.get("color", "auto")
+            try:
+                width_pt = round(int(sz) / 8, 2) if sz else 0.5
+            except (ValueError, TypeError):
+                width_pt = 0.5
+            borders[edge] = {
+                "style": "double" if val == "double" else "solid",
+                "width_pt": width_pt,
+                "color": "000000" if (not color or color.upper() == "AUTO") else color.upper(),
+            }
+        if borders:
+            result["borders"] = borders
     return result
 
 
@@ -821,6 +862,10 @@ def _cell_style_to_css(cstyle: dict) -> str:
     parts: list[str] = []
     if not cstyle:
         return ""
+    background = cstyle.get("background")
+    if background:
+        bg = background if background.startswith("#") else f"#{background}"
+        parts.append(f"background-color: {bg};")
     valign = cstyle.get("vertical_align")
     if valign:
         v = valign
@@ -895,6 +940,27 @@ def _parse_styles(styles_root: ET.Element) -> Dict[str, dict]:
                     tbl_style["borders"] = borders
                 if cell_margins:
                     tbl_style["cell_margins"] = cell_margins
+            # Conditional formats (tblStylePr) — firstRow, lastRow, band1Horz, etc.
+            cond_formats: dict = {}
+            for cond in style.findall(f"{W_NS}tblStylePr"):
+                ctype = cond.get(f"{W_NS}type") or cond.get("type")
+                if not ctype:
+                    continue
+                cf: dict = {}
+                cond_tcpr = cond.find(f"{W_NS}tcPr")
+                if cond_tcpr is not None:
+                    cell_cf = _extract_cell_props_from_tcpr(cond_tcpr)
+                    if cell_cf:
+                        cf["cell"] = cell_cf
+                cond_rpr = cond.find(f"{W_NS}rPr")
+                if cond_rpr is not None:
+                    run_cf = _extract_run_style(cond_rpr)
+                    if run_cf:
+                        cf["run"] = run_cf
+                if cf:
+                    cond_formats[ctype] = cf
+            if cond_formats:
+                tbl_style["cond_formats"] = cond_formats
         styles[style_id] = {
             "name": name,
             "type": style_type,
@@ -1408,8 +1474,25 @@ def _build_table_rows(
 ) -> list[list[dict[str, object]]]:
     if resolved_tbl_style is None:
         resolved_tbl_style = {}
+
+    cond_formats = resolved_tbl_style.get("cond_formats", {})
+    all_rows = table.findall(f"{W_NS}tr")
+    total_rows = len(all_rows)
+    tbl_grid = table.find(f"{W_NS}tblGrid")
+    total_cols = len(tbl_grid.findall(f"{W_NS}gridCol")) if tbl_grid is not None else 0
+
     row_cells: list[list[dict[str, object]]] = []
-    for row_index, row in enumerate(table.findall(f"{W_NS}tr")):
+    for row_index, row in enumerate(all_rows):
+        # Row-level shading from trPr/shd
+        row_background: Optional[str] = None
+        trpr = row.find(f"{W_NS}trPr")
+        if trpr is not None:
+            row_shd = trpr.find(f"{W_NS}shd")
+            if row_shd is not None:
+                fill = row_shd.get(f"{W_NS}fill") or row_shd.get("fill")
+                if fill and fill.upper() not in ("AUTO", ""):
+                    row_background = fill.upper()
+
         entries = []
         current_column = 0
         for cell in row.findall(f"{W_NS}tc"):
@@ -1429,7 +1512,41 @@ def _build_table_rows(
                     cell_blocks.append(rendered)
 
             cell_style = _extract_cell_style(cell)
-            # Apply table-style defaults when cell has no explicit overrides
+
+            # Determine which tblStylePr conditional formats apply to this cell
+            is_first_row = row_index == 0
+            is_last_row = row_index == total_rows - 1
+            is_first_col = current_column == 0
+            is_last_col = total_cols > 0 and (current_column + colspan) >= total_cols
+
+            applicable: list[str] = []
+            # Banding (lower priority — skip for edge rows)
+            if not is_first_row and not is_last_row:
+                applicable.append("band1Horz" if row_index % 2 == 0 else "band2Horz")
+            if is_first_col:
+                applicable.append("firstCol")
+            if is_last_col:
+                applicable.append("lastCol")
+            if is_first_row:
+                applicable.append("firstRow")
+            if is_last_row:
+                applicable.append("lastRow")
+
+            # Merge conditional cell props (later entries override earlier)
+            cond_cell: dict = {}
+            for cf_type in applicable:
+                cf = cond_formats.get(cf_type, {})
+                if cf.get("cell"):
+                    cond_cell = _merge_dicts(cond_cell, cf["cell"])
+
+            # Apply cascade: cond format < row shading < direct cell style (already in cell_style)
+            if "background" not in cell_style:
+                if "background" in cond_cell:
+                    cell_style["background"] = cond_cell["background"]
+                elif row_background:
+                    cell_style["background"] = row_background
+
+            # Table-style defaults for margins and borders
             if "margins" not in cell_style and resolved_tbl_style.get("cell_margins"):
                 cell_style["margins"] = resolved_tbl_style["cell_margins"]
             if "borders" not in cell_style and resolved_tbl_style.get("borders"):
@@ -1988,8 +2105,6 @@ def _is_empty_spacer_paragraph(node: "_Node | str") -> bool:
 def _normalize_attrs(node: "_Node") -> dict[str, str]:
     normalized = {}
     for key, value in node.attrs.items():
-        if key == "style":
-            continue
         if key == "class" and node.tag == "table":
             continue
         normalized[key] = value
