@@ -240,6 +240,11 @@ def _render_paragraph(node: dict, ann: Optional[dict] = None, block_idx: Optiona
 
     style_attr = f' style="{css}"' if css else ""
 
+    node_id = node.get("node_id")
+    node_attrs = ""
+    if node_id:
+        node_attrs = f' data-node-id="{html.escape(str(node_id), quote=True)}" data-node-kind="paragraph"'
+
     # Build data-* position attributes when block_idx is provided
     data_attrs = ""
     if block_idx is not None:
@@ -247,8 +252,8 @@ def _render_paragraph(node: dict, ann: Optional[dict] = None, block_idx: Optiona
         data_attrs = f' data-block="{block_idx}" data-para="{p_idx}"'
 
     if not inner.strip():
-        return f'<{tag} class="docx-empty-paragraph"{data_attrs}{style_attr}></{tag}>'
-    return f"<{tag}{data_attrs}{style_attr}>{inner}</{tag}>"
+        return f'<{tag} class="docx-empty-paragraph"{node_attrs}{data_attrs}{style_attr}></{tag}>'
+    return f"<{tag}{node_attrs}{data_attrs}{style_attr}>{inner}</{tag}>"
 
 
 def _para_has_text(node: dict) -> bool:
@@ -352,6 +357,7 @@ def _render_inline(node: dict, in_flex_para: bool = False, run_idx: Optional[int
 def _render_run(node: dict, in_flex_para: bool = False, run_idx: Optional[int] = None) -> str:
     inner = "".join(_render_run_content(c, in_flex_para=in_flex_para) for c in node.get("children", []))
     style = node.get("style", {})
+    node_id = node.get("node_id")
 
     # 3.1 — superscript / subscript (innermost — closest to text)
     vert = style.get("vertical_align")
@@ -371,10 +377,17 @@ def _render_run(node: dict, in_flex_para: bool = False, run_idx: Optional[int] =
     # 3.1 — font CSS span (outermost — applies to everything including semantic tags)
     # Always emit a wrapper span when run_idx is set so data-run is always present.
     css = _run_font_css(style)
-    if run_idx is not None:
-        run_attr = f' data-run="{run_idx}"'
+    should_wrap = run_idx is not None or css or node_id is not None
+    if should_wrap:
+        attrs: list[str] = []
+        if run_idx is not None:
+            attrs.append(f'data-run="{run_idx}"')
+        if node_id is not None:
+            attrs.append(f'data-node-id="{html.escape(str(node_id), quote=True)}"')
+            attrs.append('data-node-kind="run"')
         style_attr = f' style="{css}"' if css else ""
-        return f'<span{run_attr}{style_attr}>{inner}</span>'
+        attr_str = (" " + " ".join(attrs)) if attrs else ""
+        return f'<span{attr_str}{style_attr}>{inner}</span>'
     if css:
         inner = f'<span style="{css}">{inner}</span>'
 
@@ -509,7 +522,7 @@ def _render_blocks_in_cell(blocks: list, block_idx: Optional[int] = None) -> str
             list_tag = "ol" if style0.get("list_ordered") else "ul"
             marker = style0.get("list_marker", "disc")
             lis = "".join(
-                f"<li>{_para_inner_html_with_idx(item, block_idx=block_idx, para_idx=pi_start + gi)}</li>"
+                f'<li{_list_item_attrs(item)}>{_para_inner_html_with_idx(item, block_idx=block_idx, para_idx=pi_start + gi)}</li>'
                 for gi, item in enumerate(group)
             )
             parts.append(f'<{list_tag} style="list-style-type: {marker}">{lis}</{list_tag}>')
@@ -563,12 +576,19 @@ def _render_blocks(blocks: list, ann_map: dict | None = None, tag_block_idx: boo
             style0 = group[0].get("style", {})
             list_tag = "ol" if style0.get("list_ordered") else "ul"
             marker = style0.get("list_marker", "disc")
-            lis = "".join(f"<li>{_para_inner_html(item)}</li>" for item in group)
+            lis = "".join(f'<li{_list_item_attrs(item)}>{_para_inner_html(item)}</li>' for item in group)
             parts.append(f'<{list_tag} style="list-style-type: {marker}">{lis}</{list_tag}>')
         else:
             parts.append(_render_block(block, ann_map.get(f"b{i}", {})))
             i += 1
     return "".join(parts)
+
+
+def _list_item_attrs(node: dict) -> str:
+    node_id = node.get("node_id")
+    if not node_id:
+        return ""
+    return f' data-node-id="{html.escape(str(node_id), quote=True)}" data-node-kind="paragraph"'
 
 
 # ---------------------------------------------------------------------------

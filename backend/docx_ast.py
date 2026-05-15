@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Dict, List, Optional
 from xml.etree import ElementTree as ET
 
+from docx_node_ids import NODE_ID_ATTR, inject_docx_node_ids
+
 W_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 R_NS = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
 A_NS = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
@@ -81,6 +83,9 @@ def build_docx_ast(docx_path: str | Path) -> dict:
             except KeyError:
                 numbering = {}
 
+            id_counters = {"p": 0, "r": 0, "sdt": 0}
+            inject_docx_node_ids(document_xml, id_counters)
+
             header_parts: list[tuple[ET.Element, dict]] = []
             footer_parts: list[tuple[ET.Element, dict]] = []
             for rel in relationships.values():
@@ -97,6 +102,7 @@ def build_docx_ast(docx_path: str | Path) -> dict:
                 )
                 try:
                     part_xml = _read_xml(archive, part_path)
+                    inject_docx_node_ids(part_xml, id_counters)
                     part_dir, part_filename = part_path.rsplit("/", 1)
                     rels_path = f"{part_dir}/_rels/{part_filename}.rels"
                     try:
@@ -236,7 +242,12 @@ def _build_paragraph(
             cb = _build_checkbox(child)
             if cb is not None:
                 children.append(cb)
-    return {"type": "paragraph", "style": pstyle, "children": children}
+    return {
+        "type": "paragraph",
+        "style": pstyle,
+        "node_id": paragraph.get(NODE_ID_ATTR),
+        "children": children,
+    }
 
 
 def _build_checkbox(sdt: ET.Element) -> dict | None:
@@ -247,7 +258,12 @@ def _build_checkbox(sdt: ET.Element) -> dict | None:
         return None
     checked_elem = sdtpr.find(f"{W14_NS}checkbox/{W14_NS}checked")
     checked = (checked_elem.get(f"{W14_NS}val") if checked_elem is not None else "0") == "1"
-    return {"type": "run", "style": {}, "children": [{"type": "checkbox", "checked": checked}]}
+    return {
+        "type": "run",
+        "style": {},
+        "node_id": sdt.get(NODE_ID_ATTR),
+        "children": [{"type": "checkbox", "checked": checked}],
+    }
 
 
 def _extract_paragraph_style(paragraph: ET.Element, styles: dict) -> dict:
@@ -334,7 +350,12 @@ def _build_run(run: ET.Element, relationships: dict, media: dict) -> dict:
             if img is not None:
                 children.append(img)
 
-    return {"type": "run", "style": run_style, "children": children}
+    return {
+        "type": "run",
+        "style": run_style,
+        "node_id": run.get(NODE_ID_ATTR),
+        "children": children,
+    }
 
 
 def _extract_run_style(rpr: ET.Element) -> dict:

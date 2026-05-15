@@ -273,31 +273,21 @@ export default function DocumentWorkbench() {
     if (!originalKey || status !== 'ready') return;
     setMessage('Exporting DOCX…');
     try {
-      // Parse current HTML and extract all data-run spans
+      // Parse current HTML and extract stable node-identified run elements.
       const parser = new DOMParser();
       const doc = parser.parseFromString(htmlDraft, 'text/html');
       const patches: Array<Record<string, unknown>> = [];
 
-      doc.querySelectorAll('[data-run]').forEach(el => {
-        const runIdx  = parseInt(el.getAttribute('data-run')  ?? '0', 10);
-        // Walk up to find para, cell, row, block
-        const pEl   = el.closest('[data-para]');
-        const tdEl  = el.closest('[data-cell]');
-        const trEl  = el.closest('[data-row]');
-        const blkEl = el.closest('[data-block]');
-        if (!pEl || !blkEl) return;
+      doc.querySelectorAll('[data-node-kind="run"][data-node-id]').forEach(el => {
+        const nodeId = el.getAttribute('data-node-id');
+        if (!nodeId) return;
 
         const patch: Record<string, unknown> = {
-          block: parseInt(blkEl.getAttribute('data-block') ?? '0', 10),
-          para:  parseInt(pEl.getAttribute('data-para')   ?? '0', 10),
-          run:   runIdx,
+          node_id: nodeId,
+          operation: el.querySelector('[data-type="checkbox"]') ? 'toggle_checkbox' : 'replace_text',
         };
-        if (tdEl) patch.cell = parseInt(tdEl.getAttribute('data-cell') ?? '0', 10);
-        if (trEl) patch.row  = parseInt(trEl.getAttribute('data-row')  ?? '0', 10);
 
-        // Checkbox detection
-        const isCheckbox = el.getAttribute('data-type') === 'checkbox';
-        if (isCheckbox) {
+        if (patch.operation === 'toggle_checkbox') {
           patch.checked = el.textContent?.includes('☒') ?? false;
         } else {
           patch.text = el.textContent ?? '';
