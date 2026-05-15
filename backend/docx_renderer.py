@@ -46,6 +46,11 @@ def render_ast_to_html(ast: dict, annotations: Optional[dict] = None) -> str:
             body_blocks = blocks
             body_si = si
 
+    # Tag body blocks with their positional index BEFORE splitting pages so
+    # each block carries _idx through into the page-split copies.
+    for idx, block in enumerate(body_blocks):
+        block["_idx"] = idx
+
     page_groups = _split_pages(body_blocks)
     page_divs: list[str] = []
     block_offset = 0
@@ -54,6 +59,7 @@ def render_ast_to_html(ast: dict, annotations: Optional[dict] = None) -> str:
             f"b{li}": ann_blocks.get(f"s{body_si}:b{block_offset + li}", {})
             for li in range(len(group))
         }
+        # tag_block_idx=False because _idx is already set on each block above
         content = _render_blocks(group, ann_map)
         hdr = f'<div class="docx-page-header">{header_html}</div>' if header_html else ""
         ftr = f'<div class="docx-page-footer">{footer_html}</div>' if footer_html else ""
@@ -184,16 +190,17 @@ def validate_ast_html(ast: dict, rendered_html: str) -> dict:
 def _render_block(block: dict, ann: Optional[dict] = None) -> str:
     ann = ann or {}
     kind = block.get("type")
+    block_idx = block.get("_idx")
     if kind == "paragraph":
-        return _render_paragraph(block, ann)
+        return _render_paragraph(block, ann, block_idx=block_idx)
     if kind == "table":
         head = block.get("_para_split_head")
         tail = block.get("_para_split_tail")
-        return _render_table(block, ann, para_split_head=head, para_split_tail=tail)
+        return _render_table(block, ann, para_split_head=head, para_split_tail=tail, block_idx=block_idx)
     return ""
 
 
-def _render_paragraph(node: dict, ann: Optional[dict] = None) -> str:
+def _render_paragraph(node: dict, ann: Optional[dict] = None, block_idx: Optional[int] = None, para_idx: Optional[int] = None) -> str:
     ann = ann or {}
     style = node.get("style", {})
 
@@ -213,7 +220,11 @@ def _render_paragraph(node: dict, ann: Optional[dict] = None) -> str:
         and _para_anchor_on_right(node)
     )
 
-    inner = "".join(_render_inline(c, in_flex_para=use_flex) for c in node.get("children", []))
+    children = node.get("children", [])
+    inner = "".join(
+        _render_inline(c, in_flex_para=use_flex, run_idx=ri)
+        for ri, c in enumerate(children)
+    )
 
     ann_css = _annotation_block_css(ann)
 
@@ -229,9 +240,15 @@ def _render_paragraph(node: dict, ann: Optional[dict] = None) -> str:
 
     style_attr = f' style="{css}"' if css else ""
 
+    # Build data-* position attributes when block_idx is provided
+    data_attrs = ""
+    if block_idx is not None:
+        p_idx = para_idx if para_idx is not None else 0
+        data_attrs = f' data-block="{block_idx}" data-para="{p_idx}"'
+
     if not inner.strip():
-        return f'<{tag} class="docx-empty-paragraph"{style_attr}></{tag}>'
-    return f"<{tag}{style_attr}>{inner}</{tag}>"
+        return f'<{tag} class="docx-empty-paragraph"{data_attrs}{style_attr}></{tag}>'
+    return f"<{tag}{data_attrs}{style_attr}>{inner}</{tag}>"
 
 
 def _para_has_text(node: dict) -> bool:
@@ -323,19 +340,17 @@ def _paragraph_css(style: dict) -> str:
 # Inline rendering
 # ---------------------------------------------------------------------------
 
-def _render_inline(node: dict, in_flex_para: bool = False) -> str:
+def _render_inline(node: dict, in_flex_para: bool = False, run_idx: Optional[int] = None) -> str:
     kind = node.get("type")
     if kind == "run":
-        return _render_run(node, in_flex_para=in_flex_para)
+        return _render_run(node, in_flex_para=in_flex_para, run_idx=run_idx)
     if kind == "hyperlink":
-        return _render_hyperlink(node)
+        return _render_hyperlink(node, run_idx=run_idx)
     return ""
 
 
-def _render_run(node: dict, in_flex_para: bool = False) -> str:
+def _render_run(node: dict, in_flex_para: bool = False, run_idx: Optional[int] = None) -> str:
     inner = "".join(_render_run_content(c, in_flex_para=in_flex_para) for c in node.get("children", []))
-    if not inner:
-        return ""
     style = node.get("style", {})
 
     # 3.1 — superscript / subscript (innermost — closest to text)
@@ -354,7 +369,12 @@ def _render_run(node: dict, in_flex_para: bool = False) -> str:
         inner = f"<strong>{inner}</strong>"
 
     # 3.1 — font CSS span (outermost — applies to everything including semantic tags)
+    # Always emit a wrapper span when run_idx is set so data-run is always present.
     css = _run_font_css(style)
+    if run_idx is not None:
+        run_attr = f' data-run="{run_idx}"'
+        style_attr = f' style="{css}"' if css else ""
+        return f'<span{run_attr}{style_attr}>{inner}</span>'
     if css:
         inner = f'<span style="{css}">{inner}</span>'
 
@@ -394,17 +414,20 @@ def _render_run_content(node: dict, in_flex_para: bool = False) -> str:
         return _render_image(node, in_flex_para=in_flex_para)
     if kind == "checkbox":
         char = "☒" if node.get("checked") else "☐"
-        return f'<span style="font-family:serif;font-size:1.1em;vertical-align:middle">{char}</span>'
+        return f'<span data-type="checkbox" style="font-family:serif;font-size:1.1em;vertical-align:middle">{char}</span>'
     return ""
 
 
-def _render_hyperlink(node: dict) -> str:
+def _render_hyperlink(node: dict, run_idx: Optional[int] = None) -> str:
     inner = "".join(_render_run(r) for r in node.get("children", []))
     if not inner:
         return ""
     href = node.get("href")
+    run_attr = f' data-run="{run_idx}"' if run_idx is not None else ""
     if href:
-        return f'<a href="{html.escape(href, quote=True)}">{inner}</a>'
+        return f'<a{run_attr} href="{html.escape(href, quote=True)}">{inner}</a>'
+    if run_attr:
+        return f'<span{run_attr}>{inner}</span>'
     return inner
 
 
@@ -464,9 +487,65 @@ def _para_inner_html(node: dict) -> str:
     return "".join(_render_inline(c, in_flex_para=use_flex) for c in node.get("children", []))
 
 
-def _render_blocks(blocks: list, ann_map: dict | None = None) -> str:
-    """Render a sequence of blocks, grouping consecutive list paragraphs into <ul>/<ol>."""
+def _render_blocks_in_cell(blocks: list, block_idx: Optional[int] = None) -> str:
+    """Like _render_blocks but for cell children: threads block_idx/para_idx into
+    paragraphs for data-* attributes while still grouping list items into <ul>/<ol>."""
+    parts: list[str] = []
+    i = 0
+    while i < len(blocks):
+        block = blocks[i]
+        num_id = block.get("style", {}).get("num_id") if block.get("type") == "paragraph" else None
+        if num_id:
+            group: list[dict] = []
+            pi_start = i
+            while (
+                i < len(blocks)
+                and blocks[i].get("type") == "paragraph"
+                and blocks[i].get("style", {}).get("num_id") == num_id
+            ):
+                group.append(blocks[i])
+                i += 1
+            style0 = group[0].get("style", {})
+            list_tag = "ol" if style0.get("list_ordered") else "ul"
+            marker = style0.get("list_marker", "disc")
+            lis = "".join(
+                f"<li>{_para_inner_html_with_idx(item, block_idx=block_idx, para_idx=pi_start + gi)}</li>"
+                for gi, item in enumerate(group)
+            )
+            parts.append(f'<{list_tag} style="list-style-type: {marker}">{lis}</{list_tag}>')
+        else:
+            if block.get("type") == "paragraph":
+                parts.append(_render_paragraph(block, para_idx=i, block_idx=block_idx))
+            else:
+                parts.append(_render_block(block))
+            i += 1
+    return "".join(parts)
+
+
+def _para_inner_html_with_idx(node: dict, block_idx: Optional[int] = None, para_idx: Optional[int] = None) -> str:
+    """Same as _para_inner_html but used inside list items — extracts just the inner HTML."""
+    use_flex = (
+        node.get("style", {}).get("alignment") == "right"
+        and not _para_has_text(node)
+        and _para_anchor_on_right(node)
+    )
+    children = node.get("children", [])
+    return "".join(
+        _render_inline(c, in_flex_para=use_flex, run_idx=ri)
+        for ri, c in enumerate(children)
+    )
+
+
+def _render_blocks(blocks: list, ann_map: dict | None = None, tag_block_idx: bool = False) -> str:
+    """Render a sequence of blocks, grouping consecutive list paragraphs into <ul>/<ol>.
+
+    When tag_block_idx is True (body section only), each block gets its positional
+    index stored as block["_idx"] before rendering so data-block attributes are emitted.
+    """
     ann_map = ann_map or {}
+    if tag_block_idx:
+        for idx, block in enumerate(blocks):
+            block["_idx"] = idx
     parts: list[str] = []
     i = 0
     while i < len(blocks):
@@ -501,6 +580,7 @@ def _render_table(
     ann: Optional[dict] = None,
     para_split_head: Optional[int] = None,
     para_split_tail: Optional[int] = None,
+    block_idx: Optional[int] = None,
 ) -> str:
     ann = ann or {}
     ann_css = _annotation_block_css(ann)
@@ -511,10 +591,11 @@ def _render_table(
     tbl_cell_margins = node.get("tbl_cell_margins") or {}
     colgroup = _render_colgroup(node.get("column_widths_twips", []))
     rows = "".join(
-        _render_row(r, tbl_borders, tbl_cell_margins, para_split_head=para_split_head, para_split_tail=para_split_tail)
-        for r in node.get("rows", [])
+        _render_row(r, tbl_borders, tbl_cell_margins, row_idx=ri, block_idx=block_idx, para_split_head=para_split_head, para_split_tail=para_split_tail)
+        for ri, r in enumerate(node.get("rows", []))
     )
-    return f'<table style="{table_style}">{colgroup}{rows}</table>'
+    data_attrs = f' data-block="{block_idx}"' if block_idx is not None else ""
+    return f'<table{data_attrs} style="{table_style}">{colgroup}{rows}</table>'
 
 
 def _render_colgroup(widths: list) -> str:
@@ -538,26 +619,34 @@ def _render_row(
     row: dict,
     tbl_borders: dict,
     tbl_cell_margins: dict | None = None,
+    row_idx: Optional[int] = None,
+    block_idx: Optional[int] = None,
     para_split_head: Optional[int] = None,
     para_split_tail: Optional[int] = None,
 ) -> str:
     h = row.get("height_twips")
     row_style = f' style="height: {_twips_to_px(h)}px"' if h else ""
+    data_attrs = f' data-row="{row_idx}"' if row_idx is not None else ""
     cells = "".join(
-        _render_cell(c, tbl_borders, tbl_cell_margins, para_split_head=para_split_head, para_split_tail=para_split_tail)
-        for c in row.get("cells", [])
+        _render_cell(c, tbl_borders, tbl_cell_margins, cell_idx=ci, block_idx=block_idx, row_idx=row_idx, para_split_head=para_split_head, para_split_tail=para_split_tail)
+        for ci, c in enumerate(row.get("cells", []))
     )
-    return f"<tr{row_style}>{cells}</tr>"
+    return f"<tr{data_attrs}{row_style}>{cells}</tr>"
 
 
 def _render_cell(
     cell: dict,
     tbl_borders: Optional[dict] = None,
     tbl_cell_margins: Optional[dict] = None,
+    cell_idx: Optional[int] = None,
+    block_idx: Optional[int] = None,
+    row_idx: Optional[int] = None,
     para_split_head: Optional[int] = None,
     para_split_tail: Optional[int] = None,
 ) -> str:
     attrs: list[str] = []
+    if cell_idx is not None:
+        attrs.append(f'data-cell="{cell_idx}"')
     if cell.get("colspan", 1) > 1:
         attrs.append(f'colspan="{cell["colspan"]}"')
     if cell.get("rowspan", 1) > 1:
@@ -573,7 +662,8 @@ def _render_cell(
         children = children[:para_split_head]
     elif para_split_tail is not None:
         children = children[para_split_tail:]
-    inner = _render_blocks(children)
+
+    inner = _render_blocks_in_cell(children, block_idx=block_idx)
     return f"<td{attr_str}>{inner}</td>"
 
 

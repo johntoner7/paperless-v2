@@ -117,6 +117,7 @@ export default function DocumentWorkbench() {
   const [library, setLibrary] = useState<LibraryUpload[]>([]);
   const [selectedKey, setSelectedKey] = useState('');
   const [docxSource, setDocxSource] = useState<string | null>(null);
+  const [originalKey, setOriginalKey] = useState<string | null>(null);
   const [showCompare, setShowCompare] = useState(false);
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [useAI, setUseAI] = useState(false);
@@ -195,7 +196,7 @@ export default function DocumentWorkbench() {
           const title = stripExtension(sourceFile.name);
           skipRestoreRef.current = true;
           setDocTitle(title); setHtmlDraft(html);
-          setDocxSource(result.originalUrl ?? null); setShowCompare(false);
+          setDocxSource(result.originalUrl ?? null); setOriginalKey(key); setShowCompare(false);
           setStatus('ready'); setMessage('Conversion complete.');
           setSavedAt(null);
           localStorage.setItem(`pb:draft:${title}`, html);
@@ -224,7 +225,7 @@ export default function DocumentWorkbench() {
       const title = stripExtension(entry.fileName);
       skipRestoreRef.current = true;
       setDocTitle(title); setSourceFile(null); setHtmlDraft(html);
-      setDocxSource(result.originalUrl ?? null); setShowCompare(false);
+      setDocxSource(result.originalUrl ?? null); setOriginalKey(key); setShowCompare(false);
       setSelectedKey(key); setStatus('ready'); setMessage(`Opened ${entry.fileName}`);
       setSavedAt(null);
       localStorage.setItem(`pb:draft:${title}`, html);
@@ -268,6 +269,65 @@ export default function DocumentWorkbench() {
     }
   }
 
+  async function handleExportDocx() {
+    if (!originalKey || status !== 'ready') return;
+    setMessage('Exporting DOCX…');
+    try {
+      // Parse current HTML and extract all data-run spans
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(htmlDraft, 'text/html');
+      const patches: Array<Record<string, unknown>> = [];
+
+      doc.querySelectorAll('[data-run]').forEach(el => {
+        const runIdx  = parseInt(el.getAttribute('data-run')  ?? '0', 10);
+        // Walk up to find para, cell, row, block
+        const pEl   = el.closest('[data-para]');
+        const tdEl  = el.closest('[data-cell]');
+        const trEl  = el.closest('[data-row]');
+        const blkEl = el.closest('[data-block]');
+        if (!pEl || !blkEl) return;
+
+        const patch: Record<string, unknown> = {
+          block: parseInt(blkEl.getAttribute('data-block') ?? '0', 10),
+          para:  parseInt(pEl.getAttribute('data-para')   ?? '0', 10),
+          run:   runIdx,
+        };
+        if (tdEl) patch.cell = parseInt(tdEl.getAttribute('data-cell') ?? '0', 10);
+        if (trEl) patch.row  = parseInt(trEl.getAttribute('data-row')  ?? '0', 10);
+
+        // Checkbox detection
+        const isCheckbox = el.getAttribute('data-type') === 'checkbox';
+        if (isCheckbox) {
+          patch.checked = el.textContent?.includes('☒') ?? false;
+        } else {
+          patch.text = el.textContent ?? '';
+        }
+        patches.push(patch);
+      });
+
+      const resp = await fetch(`${PRESIGN_URL}?action=export-docx`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ originalKey, patches }),
+      });
+      if (!resp.ok) throw new Error(`Export failed: ${resp.status}`);
+      const { url } = await resp.json() as { url: string };
+
+      // Trigger download
+      const a = Object.assign(document.createElement('a'), {
+        href: url,
+        download: `${docTitle || 'document'}-exported.docx`,
+      });
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setMessage('DOCX exported.');
+    } catch (e) {
+      setStatus('error');
+      setMessage(e instanceof Error ? e.message : 'Export failed.');
+    }
+  }
+
   const isReady = status === 'ready';
   const canCompare = isReady && docxSource !== null;
 
@@ -302,6 +362,15 @@ export default function DocumentWorkbench() {
           <Button variant="outline" size="sm" className="border-sky-200 text-sky-700 hover:bg-sky-50" onClick={() => void handleSave()} disabled={!isReady}>
             <Save className="h-3.5 w-3.5" />
             <span className="hidden sm:inline">Save HTML</span>
+          </Button>
+          <Button
+            variant="outline" size="sm"
+            className="border-emerald-200 text-emerald-700 hover:bg-emerald-50"
+            onClick={() => void handleExportDocx()}
+            disabled={!isReady || !originalKey}
+          >
+            <Download className="h-3.5 w-3.5" />
+            <span className="hidden sm:inline">Export DOCX</span>
           </Button>
           <Button size="sm" className="bg-sky-500 hover:bg-sky-600 text-white border-0" onClick={() => void handlePdf()} disabled={!isReady}>
             <Download className="h-3.5 w-3.5" />

@@ -110,10 +110,10 @@ def lambda_handler(event, context):
             payload = json.loads(body)
             key = payload.get('key')
             use_ai = payload.get('useAI', False)
-            
+
             if not key:
                 return make_response(400, {'error': 'key is required'})
-            
+
             try:
                 invoke_payload = {
                     'bucket': BUCKET,
@@ -128,6 +128,47 @@ def lambda_handler(event, context):
                 return make_response(202, {'status': 'conversion_started', 'key': key})
             except Exception as e:
                 return make_response(500, {'error': f'Failed to invoke renderer: {str(e)}'})
+
+        if method == 'POST' and action == 'export-docx':
+            # Body: {"originalKey": "uploads/uuid/file.docx", "patches": [...]}
+            body_raw = event.get('body') or ''
+            if event.get('isBase64Encoded'):
+                import base64
+                body_raw = base64.b64decode(body_raw).decode('utf-8')
+            payload = json.loads(body_raw)
+            original_key = payload.get('originalKey')
+            patches = payload.get('patches', [])
+            if not original_key:
+                return make_response(400, {'error': 'originalKey is required'})
+
+            import tempfile, sys, os
+            sys.path.insert(0, '/var/task')
+            from docx_writer import apply_patches
+
+            with tempfile.TemporaryDirectory() as tmp:
+                src = os.path.join(tmp, 'original.docx')
+                s3.download_file(BUCKET, original_key, src)
+                with open(src, 'rb') as fh:
+                    docx_bytes = fh.read()
+
+            out_bytes = apply_patches(docx_bytes, patches)
+
+            # Upload to exported/uuid/filename-exported.docx
+            base = os.path.splitext(os.path.basename(original_key))[0]
+            key_dir = os.path.dirname(original_key).replace('uploads/', 'exported/', 1)
+            out_key = f"{key_dir}/{base}-exported.docx"
+            s3.put_object(
+                Bucket=BUCKET,
+                Key=out_key,
+                Body=out_bytes,
+                ContentType='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            )
+            download_url = s3.generate_presigned_url(
+                'get_object',
+                Params={'Bucket': BUCKET, 'Key': out_key},
+                ExpiresIn=URL_EXPIRATION,
+            )
+            return make_response(200, {'url': download_url, 'key': out_key})
 
         if method == 'POST':
             # expect JSON body with fileName and optional contentType
