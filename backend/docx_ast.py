@@ -21,10 +21,38 @@ WP_NS = "{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing
 REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 VML_NS = "{urn:schemas-microsoft-com:vml}"
 XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
+W14_NS = "{http://schemas.microsoft.com/office/word/2010/wordml}"
 
 
 class DocxAstError(RuntimeError):
     pass
+
+
+_ORDERED_NUM_FMTS = frozenset({
+    "decimal", "upperRoman", "lowerRoman", "upperLetter", "lowerLetter",
+    "decimalZero", "ordinal", "cardinalText", "ordinalText",
+    "hex", "decimalEnclosedCircle", "decimalFullWidth", "decimalHalfWidth",
+    "decimalFullWidth2",
+})
+
+_NUM_FMT_TO_CSS = {
+    "decimal": "decimal",
+    "upperRoman": "upper-roman",
+    "lowerRoman": "lower-roman",
+    "upperLetter": "upper-alpha",
+    "lowerLetter": "lower-alpha",
+    "decimalZero": "decimal-leading-zero",
+}
+
+_BULLET_CHAR_TO_MARKER = {
+    "•": "disc",    # •
+    "‣": "disc",    # ‣
+    "◦": "circle",  # ◦
+    "○": "circle",  # ○
+    "▪": "square",  # ▪
+    "■": "square",  # ■
+    "●": "disc",    # ●
+}
 
 
 # ---------------------------------------------------------------------------
@@ -47,6 +75,11 @@ def build_docx_ast(docx_path: str | Path) -> dict:
                 _read_xml(archive, "word/_rels/document.xml.rels")
             )
             media = _load_media(archive)
+
+            try:
+                numbering = _parse_numbering(_read_xml(archive, "word/numbering.xml"))
+            except KeyError:
+                numbering = {}
 
             header_parts: list[tuple[ET.Element, dict]] = []
             footer_parts: list[tuple[ET.Element, dict]] = []
@@ -104,15 +137,17 @@ def build_docx_ast(docx_path: str | Path) -> dict:
         for path_key, img_bytes in media.items()
     }
 
-    page_setup = _extract_page_setup(body_elem)
+    page_setup = _extract_page_setup(body_elem, styles_root)
 
-    return {
+    result = {
         "version": "1.0",
         "sections": sections,
         "relationships": relationships,
         "images": images,
         "page_setup": page_setup,
     }
+    _annotate_list_paragraphs(result, numbering)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -130,10 +165,57 @@ def _build_blocks(
     for child in root:
         tag = _local_name(child.tag)
         if tag == "p":
-            blocks.append(_build_paragraph(child, styles, relationships, media))
+            block = _build_paragraph(child, styles, relationships, media)
         elif tag == "tbl":
-            blocks.append(_build_table(child, styles, relationships, media, table_styles))
+            block = _build_table(child, styles, relationships, media, table_styles)
+        else:
+            continue
+        pb = _get_page_break_info(child)
+        if pb:
+            if pb.get("at_start"):
+                block["page_break_before"] = True
+            else:
+                block["page_break_info"] = pb
+        blocks.append(block)
     return blocks
+
+
+def _get_page_break_info(elem: ET.Element) -> dict | None:
+    """Return info about the first lastRenderedPageBreak within elem, or None."""
+    tag = _local_name(elem.tag)
+    if tag == "p":
+        chars_before = 0
+        for run in elem.findall(f"{W_NS}r"):
+            children = list(run)
+            for ci, child in enumerate(children):
+                if _local_name(child.tag) == "lastRenderedPageBreak":
+                    return {"at_start": chars_before == 0}
+            for t in run.findall(f"{W_NS}t"):
+                chars_before += len(t.text or "")
+        return None
+
+    if tag == "tbl":
+        # Only look at direct tr children to avoid nested tables
+        for ri, row in enumerate(c for c in elem if _local_name(c.tag) == "tr"):
+            for ci, cell in enumerate(row.findall(f"{W_NS}tc")):
+                paras = cell.findall(f"{W_NS}p")
+                chars_before = 0
+                for pi, para in enumerate(paras):
+                    for run in para.findall(f"{W_NS}r"):
+                        children = list(run)
+                        for child in children:
+                            if _local_name(child.tag) == "lastRenderedPageBreak":
+                                return {
+                                    "at_start": chars_before == 0 and pi == 0,
+                                    "row": ri,
+                                    "cell": ci,
+                                    "para": pi,
+                                }
+                        for t in run.findall(f"{W_NS}t"):
+                            chars_before += len(t.text or "")
+        return None
+
+    return None
 
 
 def _build_paragraph(
@@ -150,7 +232,22 @@ def _build_paragraph(
             children.append(_build_run(child, relationships, media))
         elif tag == "hyperlink":
             children.append(_build_hyperlink(child, relationships, media))
+        elif tag == "sdt":
+            cb = _build_checkbox(child)
+            if cb is not None:
+                children.append(cb)
     return {"type": "paragraph", "style": pstyle, "children": children}
+
+
+def _build_checkbox(sdt: ET.Element) -> dict | None:
+    sdtpr = sdt.find(f"{W_NS}sdtPr")
+    if sdtpr is None:
+        return None
+    if sdtpr.find(f"{W14_NS}checkbox") is None:
+        return None
+    checked_elem = sdtpr.find(f"{W14_NS}checkbox/{W14_NS}checked")
+    checked = (checked_elem.get(f"{W14_NS}val") if checked_elem is not None else "0") == "1"
+    return {"type": "run", "style": {}, "children": [{"type": "checkbox", "checked": checked}]}
 
 
 def _extract_paragraph_style(paragraph: ET.Element, styles: dict) -> dict:
@@ -543,6 +640,18 @@ def _build_table_rows(
     # First pass: collect raw cell data with vmerge tracking
     raw_rows: list[list[dict]] = []
     for row_index, row in enumerate(table.findall(f"{W_NS}tr")):
+        height_twips: Optional[int] = None
+        trpr = row.find(f"{W_NS}trPr")
+        if trpr is not None:
+            tr_h = trpr.find(f"{W_NS}trHeight")
+            if tr_h is not None:
+                val = tr_h.get(f"{W_NS}val") or tr_h.get("val")
+                if val:
+                    try:
+                        height_twips = int(val)
+                    except ValueError:
+                        pass
+
         entries: list[dict] = []
         current_col = 0
         for cell in row.findall(f"{W_NS}tc"):
@@ -557,6 +666,7 @@ def _build_table_rows(
                 "rowspan": 1,
                 "_vmerge": vmerge,
                 "width_twips": width_twips,
+                "_height_twips": height_twips,
                 "style": cell_style,
                 "children": children,
                 "_skip": False,
@@ -601,7 +711,8 @@ def _build_table_rows(
                 "style": entry["style"],
                 "children": entry["children"],
             })
-        rows.append({"cells": cells})
+        height = entries[0]["_height_twips"] if entries else None
+        rows.append({"height_twips": height, "cells": cells})
     return rows
 
 
@@ -701,37 +812,87 @@ def _extract_cell_style(cell: ET.Element) -> dict:
 # Page setup extraction
 # ---------------------------------------------------------------------------
 
-def _extract_page_setup(body: ET.Element) -> dict:
-    """Extract page dimensions and margins from w:sectPr (twips → inches)."""
+def _extract_page_setup(body: ET.Element, styles_root: ET.Element | None = None) -> dict:
+    """Extract page dimensions, margins, and default typography from the document."""
     sect = body.find(f"{W_NS}sectPr")
-    if sect is None:
-        return {}
-
     result: dict = {}
 
-    pg_sz = sect.find(f"{W_NS}pgSz")
-    if pg_sz is not None:
-        w = pg_sz.get(f"{W_NS}w")
-        h = pg_sz.get(f"{W_NS}h")
-        if w and h:
-            try:
-                result["width_in"] = round(int(w) / 1440, 4)
-                result["height_in"] = round(int(h) / 1440, 4)
-            except ValueError:
-                pass
-
-    pg_mar = sect.find(f"{W_NS}pgMar")
-    if pg_mar is not None:
-        margins: dict = {}
-        for edge in ("top", "right", "bottom", "left"):
-            v = pg_mar.get(f"{W_NS}{edge}")
-            if v:
+    if sect is not None:
+        pg_sz = sect.find(f"{W_NS}pgSz")
+        if pg_sz is not None:
+            w = pg_sz.get(f"{W_NS}w")
+            h = pg_sz.get(f"{W_NS}h")
+            if w and h:
                 try:
-                    margins[edge] = round(int(v) / 1440, 4)
+                    result["width_in"] = round(int(w) / 1440, 4)
+                    result["height_in"] = round(int(h) / 1440, 4)
                 except ValueError:
                     pass
-        if margins:
-            result["margins_in"] = margins
+
+        pg_mar = sect.find(f"{W_NS}pgMar")
+        if pg_mar is not None:
+            margins: dict = {}
+            for edge in ("top", "right", "bottom", "left"):
+                v = pg_mar.get(f"{W_NS}{edge}")
+                if v:
+                    try:
+                        margins[edge] = round(int(v) / 1440, 4)
+                    except ValueError:
+                        pass
+            if margins:
+                result["margins_in"] = margins
+
+    if styles_root is not None:
+        dd = styles_root.find(f"{W_NS}docDefaults/{W_NS}rPrDefault/{W_NS}rPr")
+        if dd is not None:
+            sz = dd.find(f"{W_NS}sz")
+            if sz is not None:
+                v = sz.get(f"{W_NS}val") or sz.get("val")
+                if v:
+                    try:
+                        result["default_font_size_pt"] = int(v) / 2
+                    except ValueError:
+                        pass
+        # Extract default paragraph spacing and line height from docDefaults
+        dd_ppr = styles_root.find(f"{W_NS}docDefaults/{W_NS}pPrDefault/{W_NS}pPr")
+        if dd_ppr is not None:
+            spacing = dd_ppr.find(f"{W_NS}spacing")
+            if spacing is not None:
+                line = spacing.get(f"{W_NS}line")
+                line_rule = spacing.get(f"{W_NS}lineRule")
+                after = spacing.get(f"{W_NS}after")
+                before = spacing.get(f"{W_NS}before")
+                if line and line_rule == "auto":
+                    try:
+                        result["default_line_height"] = round(int(line) / 240, 4)
+                    except ValueError:
+                        pass
+                if after is not None:
+                    try:
+                        result["default_para_after_twips"] = int(after)
+                    except ValueError:
+                        pass
+                if before is not None:
+                    try:
+                        result["default_para_before_twips"] = int(before)
+                    except ValueError:
+                        pass
+
+        # Fall back to Normal style if docDefaults doesn't have spacing
+        if "default_line_height" not in result:
+            for style in styles_root.findall(f"{W_NS}style"):
+                name_elem = style.find(f"{W_NS}name")
+                if name_elem is not None and name_elem.get(f"{W_NS}val") == "Normal":
+                    spacing = style.find(f"{W_NS}pPr/{W_NS}spacing")
+                    if spacing is not None:
+                        line = spacing.get(f"{W_NS}line")
+                        line_rule = spacing.get(f"{W_NS}lineRule")
+                        if line and line_rule in ("auto", None):
+                            try:
+                                result["default_line_height"] = round(int(line) / 240, 4)
+                            except ValueError:
+                                pass
+                    break
 
     return result
 
@@ -754,6 +915,68 @@ def _parse_styles(styles_root: ET.Element) -> dict[str, str]:
         if style_id and style_type == "paragraph" and name_elem is not None:
             styles[style_id] = name_elem.get(f"{W_NS}val", "")
     return styles
+
+
+def _parse_numbering(numbering_root: ET.Element) -> dict:
+    """Parse word/numbering.xml → {numId: {ilvl: {numFmt, lvlText}}}."""
+    abstract: dict = {}
+    for an in numbering_root.findall(f"{W_NS}abstractNum"):
+        aid = an.get(f"{W_NS}abstractNumId")
+        if aid is None:
+            continue
+        levels: dict = {}
+        for lvl in an.findall(f"{W_NS}lvl"):
+            ilvl_val = lvl.get(f"{W_NS}ilvl")
+            if ilvl_val is None:
+                continue
+            nf = lvl.find(f"{W_NS}numFmt")
+            fmt = (nf.get(f"{W_NS}val") or nf.get("val") or "bullet") if nf is not None else "bullet"
+            lt = lvl.find(f"{W_NS}lvlText")
+            lvl_text = ""
+            if lt is not None:
+                lvl_text = lt.get(f"{W_NS}val") or lt.get("val") or ""
+            try:
+                levels[int(ilvl_val)] = {"numFmt": fmt, "lvlText": lvl_text}
+            except ValueError:
+                pass
+        abstract[aid] = levels
+
+    result: dict = {}
+    for num in numbering_root.findall(f"{W_NS}num"):
+        nid = num.get(f"{W_NS}numId")
+        aid_elem = num.find(f"{W_NS}abstractNumId")
+        if nid and aid_elem is not None:
+            aid = aid_elem.get(f"{W_NS}val")
+            result[nid] = abstract.get(aid or "", {})
+    return result
+
+
+def _annotate_list_paragraphs(ast: dict, numbering: dict) -> None:
+    """Walk AST and add list_marker / list_ordered to paragraphs that have num_id."""
+    def annotate_blocks(blocks: list) -> None:
+        for block in blocks:
+            if block.get("type") == "paragraph":
+                style = block.get("style", {})
+                num_id = style.get("num_id")
+                if num_id:
+                    ilvl = style.get("ilvl", 0)
+                    level = numbering.get(str(num_id), {}).get(ilvl, {})
+                    fmt = level.get("numFmt", "bullet")
+                    lvl_text = level.get("lvlText", "")
+                    if fmt in _ORDERED_NUM_FMTS:
+                        style["list_ordered"] = True
+                        style["list_marker"] = _NUM_FMT_TO_CSS.get(fmt, "decimal")
+                    else:
+                        style["list_ordered"] = False
+                        # PUA or unrecognised bullet → square fallback
+                        style["list_marker"] = _BULLET_CHAR_TO_MARKER.get(lvl_text, "square")
+            elif block.get("type") == "table":
+                for row in block.get("rows", []):
+                    for cell in row.get("cells", []):
+                        annotate_blocks(cell.get("children", []))
+
+    for section in ast.get("sections", []):
+        annotate_blocks(section.get("blocks", []))
 
 
 def _parse_relationships(rels_root: ET.Element) -> dict[str, dict[str, str]]:

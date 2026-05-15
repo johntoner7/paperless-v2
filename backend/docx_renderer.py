@@ -27,16 +27,128 @@ def render_ast_to_html(ast: dict, annotations: Optional[dict] = None) -> str:
     apply layout hints. Renderer works identically without annotations.
     """
     ann_blocks: dict = (annotations or {}).get("annotations", {})
-    parts: list[str] = []
+    page_setup = ast.get("page_setup", {})
+
+    header_html = ""
+    footer_html = ""
+    body_blocks: list = []
+    body_si = 0
+
     for si, section in enumerate(ast.get("sections", [])):
-        for bi, block in enumerate(section.get("blocks", [])):
-            key = f"s{si}:b{bi}"
-            block_ann = ann_blocks.get(key, {})
-            rendered = _render_block(block, block_ann)
-            if rendered:
-                parts.append(rendered)
-    body = "\n".join(parts)
-    return _wrap_html(f'<div class="document">\n{body}\n</div>')
+        kind = section.get("kind")
+        blocks = section.get("blocks", [])
+        ann_map = {f"b{bi}": ann_blocks.get(f"s{si}:b{bi}", {}) for bi in range(len(blocks))}
+        if kind == "header":
+            header_html = _render_blocks(blocks, ann_map)
+        elif kind == "footer":
+            footer_html = _render_blocks(blocks, ann_map)
+        elif kind == "body":
+            body_blocks = blocks
+            body_si = si
+
+    page_groups = _split_pages(body_blocks)
+    page_divs: list[str] = []
+    block_offset = 0
+    for group in page_groups:
+        ann_map = {
+            f"b{li}": ann_blocks.get(f"s{body_si}:b{block_offset + li}", {})
+            for li in range(len(group))
+        }
+        content = _render_blocks(group, ann_map)
+        hdr = f'<div class="docx-page-header">{header_html}</div>' if header_html else ""
+        ftr = f'<div class="docx-page-footer">{footer_html}</div>' if footer_html else ""
+        page_divs.append(f'<div class="docx-page">{hdr}<div class="docx-page-content">{content}</div>{ftr}</div>')
+        block_offset += len(group)
+
+    body = "\n".join(page_divs)
+    page_css = _build_page_css(page_setup)
+    return _wrap_html(f'<div class="document">\n{body}\n</div>', extra_css=page_css)
+
+
+def _split_pages(blocks: list) -> list[list]:
+    """Split block list into page groups.
+
+    Handles two kinds of page-break markers on blocks:
+    - page_break_before: True  — whole block starts a new page
+    - page_break_info: {...}   — break is mid-block; the block is split into a
+                                 head slice (current page) and tail slice (new page)
+    """
+    if not blocks:
+        return []
+    pages: list[list] = []
+    current: list = []
+    for block in blocks:
+        if block.get("page_break_before") and current:
+            pages.append(current)
+            current = [block]
+            continue
+
+        pb = block.get("page_break_info")
+        if pb and current:
+            para_split = pb.get("para", 0)
+            # Head slice: render this block up to the split paragraph
+            head = dict(block)
+            head["_para_split_head"] = para_split
+            head.pop("page_break_info", None)
+            current.append(head)
+            pages.append(current)
+            # Tail slice: render this block from the split paragraph onwards
+            tail = dict(block)
+            tail["_para_split_tail"] = para_split
+            tail.pop("page_break_info", None)
+            current = [tail]
+            continue
+
+        current.append(block)
+
+    if current:
+        pages.append(current)
+    return pages
+
+
+def _build_page_css(page_setup: dict) -> str:
+    dpi = 96
+    w_px = round((page_setup.get("width_in") or 8.5) * dpi)
+    h_px = round((page_setup.get("height_in") or 11.0) * dpi)
+    margins = page_setup.get("margins_in") or {}
+    mt = round((margins.get("top") or 0.5) * dpi)
+    mr = round((margins.get("right") or 0.5) * dpi)
+    mb = round((margins.get("bottom") or 0.5) * dpi)
+    ml = round((margins.get("left") or 0.5) * dpi)
+
+    font_pt = page_setup.get("default_font_size_pt") or 11
+    line_h = page_setup.get("default_line_height") or 1.08
+    font = f"font-size:{font_pt}pt;line-height:{line_h};font-family:Calibri,'Segoe UI',Arial,sans-serif"
+
+    after_twips = page_setup.get("default_para_after_twips")
+    before_twips = page_setup.get("default_para_before_twips")
+    para_mb = round(int(after_twips) * dpi / 1440) if after_twips is not None else 0
+    para_mt = round(int(before_twips) * dpi / 1440) if before_twips is not None else 0
+
+    # Build correct descendant selectors — comma list within `sel` would break descendant syntax
+    zones = [".docx-page-header", ".docx-page-content", ".docx-page-footer"]
+    block_tags = ["p", "h1", "h2", "h3", "h4", "h5", "h6"]
+    list_tags = ["ul", "ol"]
+    block_sel = ", ".join(f"{z} {t}" for z in zones for t in block_tags)
+    list_sel  = ", ".join(f"{z} {t}" for z in zones for t in list_tags)
+
+    return (
+        f".document{{background:#e0e0e0;padding:24px;display:flex;flex-direction:column;align-items:center;gap:24px}}"
+        f".docx-page{{width:{w_px}px;height:{h_px}px;background:white;box-shadow:0 2px 8px rgba(0,0,0,.25);box-sizing:border-box;display:flex;flex-direction:column;overflow:hidden}}"
+        f".docx-page-header{{padding:{mt}px {mr}px 0 {ml}px;{font}}}"
+        f".docx-page-content{{flex:1;padding:0 {mr}px 0 {ml}px;{font};overflow:hidden}}"
+        f".docx-page-footer{{padding:0 {mr}px {mb}px {ml}px;{font}}}"
+        # Reset browser block element margins to match Word paragraph spacing
+        f"{block_sel}{{margin-top:{para_mt}px;margin-bottom:{para_mb}px}}"
+        # Reset list indentation/margins to browser-neutral values
+        f"{list_sel}{{margin-top:{para_mt}px;margin-bottom:{para_mb}px;padding-left:2em}}"
+        # Word's Normal Table style suppresses paragraph spacing inside cells;
+        # spacing there is controlled by row height, not paragraph margins.
+        # Use !important to beat the zone-level `.docx-page-content p` rule (specificity 0,1,1).
+        "td p,th p{margin-top:0!important;margin-bottom:0!important}"
+        "td li,th li{margin-top:0!important;margin-bottom:0!important}"
+        "td ul,td ol,th ul,th ol{margin-top:0!important;margin-bottom:0!important}"
+    )
 
 
 def validate_ast_html(ast: dict, rendered_html: str) -> dict:
@@ -75,7 +187,9 @@ def _render_block(block: dict, ann: Optional[dict] = None) -> str:
     if kind == "paragraph":
         return _render_paragraph(block, ann)
     if kind == "table":
-        return _render_table(block, ann)
+        head = block.get("_para_split_head")
+        tail = block.get("_para_split_tail")
+        return _render_table(block, ann, para_split_head=head, para_split_tail=tail)
     return ""
 
 
@@ -271,11 +385,16 @@ def _render_run_content(node: dict, in_flex_para: bool = False) -> str:
         text = html.escape(node.get("text", ""), quote=False)
         if node.get("preserve_spaces"):
             text = text.replace(" ", " ")
+        # Preserve runs of 2+ spaces that HTML would otherwise collapse
+        text = re.sub(r" {2,}", lambda m: " " * len(m.group()), text)
         return text
     if kind == "break":
         return "&emsp;" if node.get("break_type") == "tab" else "<br>"
     if kind == "image":
         return _render_image(node, in_flex_para=in_flex_para)
+    if kind == "checkbox":
+        char = "☒" if node.get("checked") else "☐"
+        return f'<span style="font-family:serif;font-size:1.1em;vertical-align:middle">{char}</span>'
     return ""
 
 
@@ -336,10 +455,53 @@ def _render_image(node: dict, in_flex_para: bool = False) -> str:
 
 
 # ---------------------------------------------------------------------------
+# 3.1b — Block-list renderer (handles list grouping)
+# ---------------------------------------------------------------------------
+
+def _para_inner_html(node: dict) -> str:
+    """Return the inline content of a paragraph node without the outer tag."""
+    use_flex = _para_has_text(node) and _para_anchor_on_right(node)
+    return "".join(_render_inline(c, in_flex_para=use_flex) for c in node.get("children", []))
+
+
+def _render_blocks(blocks: list, ann_map: dict | None = None) -> str:
+    """Render a sequence of blocks, grouping consecutive list paragraphs into <ul>/<ol>."""
+    ann_map = ann_map or {}
+    parts: list[str] = []
+    i = 0
+    while i < len(blocks):
+        block = blocks[i]
+        num_id = block.get("style", {}).get("num_id") if block.get("type") == "paragraph" else None
+        if num_id:
+            group: list[dict] = []
+            while (
+                i < len(blocks)
+                and blocks[i].get("type") == "paragraph"
+                and blocks[i].get("style", {}).get("num_id") == num_id
+            ):
+                group.append(blocks[i])
+                i += 1
+            style0 = group[0].get("style", {})
+            list_tag = "ol" if style0.get("list_ordered") else "ul"
+            marker = style0.get("list_marker", "disc")
+            lis = "".join(f"<li>{_para_inner_html(item)}</li>" for item in group)
+            parts.append(f'<{list_tag} style="list-style-type: {marker}">{lis}</{list_tag}>')
+        else:
+            parts.append(_render_block(block, ann_map.get(f"b{i}", {})))
+            i += 1
+    return "".join(parts)
+
+
+# ---------------------------------------------------------------------------
 # 3.2 — Table rendering
 # ---------------------------------------------------------------------------
 
-def _render_table(node: dict, ann: Optional[dict] = None) -> str:
+def _render_table(
+    node: dict,
+    ann: Optional[dict] = None,
+    para_split_head: Optional[int] = None,
+    para_split_tail: Optional[int] = None,
+) -> str:
     ann = ann or {}
     ann_css = _annotation_block_css(ann)
     table_style = "width: 100%; border-collapse: collapse; table-layout: fixed;"
@@ -348,7 +510,10 @@ def _render_table(node: dict, ann: Optional[dict] = None) -> str:
     tbl_borders = node.get("tbl_borders") or {}
     tbl_cell_margins = node.get("tbl_cell_margins") or {}
     colgroup = _render_colgroup(node.get("column_widths_twips", []))
-    rows = "".join(_render_row(r, tbl_borders, tbl_cell_margins) for r in node.get("rows", []))
+    rows = "".join(
+        _render_row(r, tbl_borders, tbl_cell_margins, para_split_head=para_split_head, para_split_tail=para_split_tail)
+        for r in node.get("rows", [])
+    )
     return f'<table style="{table_style}">{colgroup}{rows}</table>'
 
 
@@ -369,11 +534,29 @@ def _render_colgroup(widths: list) -> str:
     return f"<colgroup>{''.join(cols)}</colgroup>"
 
 
-def _render_row(row: dict, tbl_borders: dict, tbl_cell_margins: dict | None = None) -> str:
-    return "<tr>" + "".join(_render_cell(c, tbl_borders, tbl_cell_margins) for c in row.get("cells", [])) + "</tr>"
+def _render_row(
+    row: dict,
+    tbl_borders: dict,
+    tbl_cell_margins: dict | None = None,
+    para_split_head: Optional[int] = None,
+    para_split_tail: Optional[int] = None,
+) -> str:
+    h = row.get("height_twips")
+    row_style = f' style="height: {_twips_to_px(h)}px"' if h else ""
+    cells = "".join(
+        _render_cell(c, tbl_borders, tbl_cell_margins, para_split_head=para_split_head, para_split_tail=para_split_tail)
+        for c in row.get("cells", [])
+    )
+    return f"<tr{row_style}>{cells}</tr>"
 
 
-def _render_cell(cell: dict, tbl_borders: Optional[dict] = None, tbl_cell_margins: Optional[dict] = None) -> str:
+def _render_cell(
+    cell: dict,
+    tbl_borders: Optional[dict] = None,
+    tbl_cell_margins: Optional[dict] = None,
+    para_split_head: Optional[int] = None,
+    para_split_tail: Optional[int] = None,
+) -> str:
     attrs: list[str] = []
     if cell.get("colspan", 1) > 1:
         attrs.append(f'colspan="{cell["colspan"]}"')
@@ -385,7 +568,12 @@ def _render_cell(cell: dict, tbl_borders: Optional[dict] = None, tbl_cell_margin
         attrs.append(f'style="{css}"')
 
     attr_str = (" " + " ".join(attrs)) if attrs else ""
-    inner = "".join(_render_block(b) for b in cell.get("children", []))
+    children = cell.get("children", [])
+    if para_split_head is not None:
+        children = children[:para_split_head]
+    elif para_split_tail is not None:
+        children = children[para_split_tail:]
+    inner = _render_blocks(children)
     return f"<td{attr_str}>{inner}</td>"
 
 
@@ -401,7 +589,8 @@ def _cell_css(style: dict, tbl_borders: Optional[dict] = None, tbl_cell_margins:
         left_px   = _twips_to_px(tbl_cell_margins.get("left",   0)) or 0
         parts.append(f"padding: {top_px}px {right_px}px {bottom_px}px {left_px}px")
     else:
-        parts.append("padding: 4pt")
+        # Word's Normal Table default: 0px top/bottom, 108 twips (7px) left/right
+        parts.append("padding: 0px 7px")
 
     va = style.get("vertical_align")
     css_va = "middle" if va == "center" else (va or "top")
@@ -473,7 +662,9 @@ def _annotation_block_css(ann: dict) -> str:
 # ---------------------------------------------------------------------------
 
 def _map_alignment(val: str) -> str:
-    return {"both": "justify", "start": "left", "end": "right"}.get(val, val)
+    # Map "both" (Word's justify) to "left" — browser justify stretches word-spacing on
+    # short wrapped lines producing unusable output vs Word's sophisticated layout engine.
+    return {"both": "left", "start": "left", "end": "right"}.get(val, val)
 
 
 def _twips_to_px(value: str | int | None) -> Optional[int]:
@@ -485,7 +676,8 @@ def _twips_to_px(value: str | int | None) -> Optional[int]:
         return None
 
 
-def _wrap_html(body: str) -> str:
+def _wrap_html(body: str, extra_css: str = "") -> str:
+    style_block = f"<style>\n{extra_css}\n</style>\n" if extra_css else ""
     return (
         "<!DOCTYPE html>\n"
         '<html lang="en">\n'
@@ -493,6 +685,7 @@ def _wrap_html(body: str) -> str:
         '<meta charset="utf-8">\n'
         '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
         "<title>DOCX Preview</title>\n"
+        f"{style_block}"
         "</head>\n"
         "<body>\n"
         f"{body}\n"
@@ -580,10 +773,8 @@ if __name__ == "__main__":
 
     out_path = sys.argv[2] if len(sys.argv) > 2 else None
     if out_path:
-        from docx_to_html import inject_page_css
-        html_out = inject_page_css(rendered, ast.get("page_setup"))
         with open(out_path, "w", encoding="utf-8") as fh:
-            fh.write(html_out)
+            fh.write(rendered)
         print(f"Wrote: {out_path}")
 
     print(json.dumps(report, indent=2))
