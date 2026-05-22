@@ -91,6 +91,24 @@ def _split_pages(blocks: list) -> list[list]:
 
         pb = block.get("page_break_info")
         if pb and current:
+            if block.get("type") == "table":
+                row_idx = pb.get("row")
+                if isinstance(row_idx, int) and row_idx > 0:
+                    rows = block.get("rows", [])
+                    head = dict(block)
+                    head["rows"] = rows[:row_idx]
+                    head.pop("page_break_info", None)
+                    current.append(head)
+                    pages.append(current)
+                    tail = dict(block)
+                    tail["rows"] = rows[row_idx:]
+                    tail.pop("page_break_info", None)
+                    current = [tail]
+                    continue
+                pages.append(current)
+                current = [block]
+                continue
+
             para_split = pb.get("para", 0)
             # Head slice: render this block up to the split paragraph
             head = dict(block)

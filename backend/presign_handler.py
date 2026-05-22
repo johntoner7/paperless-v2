@@ -41,6 +41,19 @@ def get_query_param(event, name):
     return params.get(name)
 
 
+def parse_json_body(event):
+    body = event.get('body') or ''
+    if event.get('isBase64Encoded'):
+        import base64
+        body = base64.b64decode(body).decode('utf-8')
+    if not body:
+        return None, 'invalid JSON body'
+    try:
+        return json.loads(body), None
+    except json.JSONDecodeError:
+        return None, 'invalid JSON body'
+
+
 def converted_html_key(source_key):
     base_no_ext = os.path.splitext(source_key)[0]
     if base_no_ext.startswith('uploads/'):
@@ -59,9 +72,23 @@ def object_exists(bucket, key):
         raise
 
 
+def list_converted_keys():
+    paginator = s3.get_paginator('list_objects_v2')
+    keys: set[str] = set()
+
+    for page in paginator.paginate(Bucket=BUCKET, Prefix='converted/'):
+        for obj in page.get('Contents', []):
+            key = obj.get('Key')
+            if key:
+                keys.add(key)
+
+    return keys
+
+
 def list_uploaded_files():
     paginator = s3.get_paginator('list_objects_v2')
     items = []
+    converted_keys = list_converted_keys()
 
     for page in paginator.paginate(Bucket=BUCKET, Prefix='uploads/'):
         for obj in page.get('Contents', []):
@@ -75,7 +102,7 @@ def list_uploaded_files():
                 'key': key,
                 'fileName': file_name,
                 'lastModified': obj.get('LastModified').isoformat() if obj.get('LastModified') else None,
-                'status': 'ready' if object_exists(BUCKET, html_key) else 'pending',
+                'status': 'ready' if html_key in converted_keys else 'pending',
             })
 
     items.sort(key=lambda item: item.get('lastModified') or '', reverse=True)
@@ -103,11 +130,9 @@ def lambda_handler(event, context):
         if method == 'POST' and action == 'convert':
             # Invoke the renderer Lambda with useAI flag
             # Expect body: {"key": "uploads/uuid/file.docx", "useAI": true}
-            body = event.get('body') or ''
-            if event.get('isBase64Encoded'):
-                import base64
-                body = base64.b64decode(body).decode('utf-8')
-            payload = json.loads(body)
+            payload, error = parse_json_body(event)
+            if error:
+                return make_response(400, {'error': error})
             key = payload.get('key')
             use_ai = payload.get('useAI', False)
 
@@ -131,11 +156,9 @@ def lambda_handler(event, context):
 
         if method == 'POST' and action == 'export-docx':
             # Body: {"originalKey": "uploads/uuid/file.docx", "patches": [...]}
-            body_raw = event.get('body') or ''
-            if event.get('isBase64Encoded'):
-                import base64
-                body_raw = base64.b64decode(body_raw).decode('utf-8')
-            payload = json.loads(body_raw)
+            payload, error = parse_json_body(event)
+            if error:
+                return make_response(400, {'error': error})
             original_key = payload.get('originalKey')
             patches = payload.get('patches', [])
             if not original_key:
@@ -172,11 +195,9 @@ def lambda_handler(event, context):
 
         if method == 'POST':
             # expect JSON body with fileName and optional contentType
-            body = event.get('body') or ''
-            if event.get('isBase64Encoded'):
-                import base64
-                body = base64.b64decode(body).decode('utf-8')
-            payload = json.loads(body)
+            payload, error = parse_json_body(event)
+            if error:
+                return make_response(400, {'error': error})
             file_name = payload.get('fileName')
             content_type = payload.get('contentType', 'application/octet-stream')
             if not file_name:

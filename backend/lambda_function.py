@@ -10,6 +10,7 @@ LOG = logging.getLogger('lambda')
 LOG.setLevel(logging.INFO)
 
 s3 = boto3.client('s3')
+RENDERER_TIMEOUT_SEC = int(os.environ.get('RENDERER_TIMEOUT_SEC', '120'))
 
 def download_s3(bucket, key, dest_path):
     s3.download_file(bucket, key, dest_path)
@@ -24,10 +25,14 @@ def run_renderer(input_path, output_path, use_ai=False):
         args = ['python3', '/var/task/docx_renderer.py', input_path, output_path]
         if use_ai:
             args.append('--use-ai')
-        subprocess.check_call(args)
+        subprocess.run(args, check=True, timeout=RENDERER_TIMEOUT_SEC)
     else:
         # Fallback: use libreoffice to convert to PDF
-        subprocess.check_call(['soffice', '--headless', '--convert-to', 'pdf', '--outdir', os.path.dirname(output_path), input_path])
+        subprocess.run(
+            ['soffice', '--headless', '--convert-to', 'pdf', '--outdir', os.path.dirname(output_path), input_path],
+            check=True,
+            timeout=RENDERER_TIMEOUT_SEC,
+        )
 
 def make_presigned_url(bucket, key, expires=3600):
     return s3.generate_presigned_url('get_object', Params={'Bucket': bucket, 'Key': key}, ExpiresIn=expires)
@@ -55,11 +60,15 @@ def lambda_handler(event, context):
         download_s3(bucket, key, inp)
         try:
             run_renderer(inp, out, use_ai=use_ai)
-        except subprocess.CalledProcessError:
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
             # try LibreOffice PDF fallback
             LOG.exception('Renderer failed; attempting LibreOffice PDF fallback')
             pdf_out = os.path.join(tmp, base + '.pdf')
-            subprocess.check_call(['soffice', '--headless', '--convert-to', 'pdf', '--outdir', tmp, inp])
+            subprocess.run(
+                ['soffice', '--headless', '--convert-to', 'pdf', '--outdir', tmp, inp],
+                check=True,
+                timeout=RENDERER_TIMEOUT_SEC,
+            )
             out = pdf_out
             out_key = f"converted/{base}.pdf"
 
