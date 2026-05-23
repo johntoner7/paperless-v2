@@ -166,10 +166,12 @@ def _build_page_css(page_setup: dict) -> str:
         f"{block_sel}{{margin-top:{para_mt}px;margin-bottom:{para_mb}px}}"
         # Reset list indentation/margins to browser-neutral values
         f"{list_sel}{{margin-top:{para_mt}px;margin-bottom:{para_mb}px;padding-left:2em}}"
-        # Word's Normal Table style suppresses paragraph spacing inside cells;
-        # spacing there is controlled by row height, not paragraph margins.
+        # Suppress paragraph spacing inside cells — Word's Normal Table style does this.
         # Use !important to beat the zone-level `.docx-page-content p` rule (specificity 0,1,1).
         "td p,th p{margin-top:0!important;margin-bottom:0!important}"
+        # Restore default after-spacing for empty spacer paragraphs inside cells so they
+        # contribute vertical space the same way Word's paragraph spacing does.
+        f"td .docx-empty-paragraph,th .docx-empty-paragraph{{margin-bottom:{para_mb}px!important}}"
         "td li,th li{margin-top:0!important;margin-bottom:0!important}"
         "td ul,td ol,th ul,th ol{margin-top:0!important;margin-bottom:0!important}"
     )
