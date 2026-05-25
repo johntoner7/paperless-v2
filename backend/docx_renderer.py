@@ -51,7 +51,9 @@ def render_ast_to_html(ast: dict, annotations: Optional[dict] = None) -> str:
     for idx, block in enumerate(body_blocks):
         block["_idx"] = idx
 
-    page_groups = _split_pages(body_blocks)
+    # Temporarily disable page splitting for HTML conversion.
+    # page_groups = _split_pages(body_blocks)
+    page_groups = [body_blocks]
     page_divs: list[str] = []
     block_offset = 0
     for group in page_groups:
