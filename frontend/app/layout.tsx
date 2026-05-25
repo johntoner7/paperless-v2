@@ -1,9 +1,10 @@
 import type { Metadata, Viewport } from 'next';
 import './globals.css';
+import { Nav } from '@/components/nav';
 
 export const metadata: Metadata = {
-  title: 'Docx to HTML',
-  description: 'Upload DOCX files, convert to HTML, edit, save, and export to PDF.',
+  title: 'Paperless',
+  description: 'DOCX tools — convert, edit, and fill forms.',
 };
 
 export const viewport: Viewport = {
@@ -13,14 +14,13 @@ export const viewport: Viewport = {
   maximumScale: 5,
 };
 
-export default function RootLayout({
-  children,
-}: Readonly<{
-  children: React.ReactNode;
-}>) {
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body className="flex flex-col h-screen">
+        <Nav />
+        {children}
+      </body>
     </html>
   );
 }

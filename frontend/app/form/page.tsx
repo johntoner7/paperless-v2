@@ -1,14 +1,11 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import { Space_Grotesk, Source_Sans_3 } from 'next/font/google';
-import { UploadCloud, Sparkles, FileCheck } from 'lucide-react';
+import { Upload, Wand2, FileCheck, Download, AlertCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { Separator } from '@/components/ui/separator';
 import { cn } from '@/lib/utils';
-
-const spaceGrotesk = Space_Grotesk({ subsets: ['latin'], weight: ['400', '600', '700'] });
-const sourceSans = Source_Sans_3({ subsets: ['latin'], weight: ['400', '600'] });
 
 type ExtractedField = {
   id?: string;
@@ -39,6 +36,7 @@ export default function FormExtractionPage() {
   const [exportStatus, setExportStatus] = useState<ExportState>('idle');
   const [exportMessage, setExportMessage] = useState('');
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
+  const [useAI, setUseAI] = useState(false);
 
   const isBusy = status === 'uploading' || status === 'extracting';
 
@@ -111,7 +109,7 @@ export default function FormExtractionPage() {
       const resp = await fetch(`${PRESIGN_URL}?action=extract`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key, useAI: false }),
+        body: JSON.stringify({ key, useAI }),
       });
       if (!resp.ok) throw new Error(`Extract failed: ${resp.status}`);
       const data = (await resp.json()) as ExtractResponse;
@@ -164,7 +162,7 @@ export default function FormExtractionPage() {
   async function handleExport() {
     if (!uploadKey || !PRESIGN_URL) return;
     setExportStatus('exporting');
-    setExportMessage('Building patches…');
+    setExportMessage('');
     try {
       const patches = buildPatches(fields);
       const resp = await fetch(`${PRESIGN_URL}?action=export-docx`, {
@@ -183,205 +181,179 @@ export default function FormExtractionPage() {
     }
   }
 
+  const statusBadge = status === 'error'
+    ? <Badge variant="destructive" className="text-xs">{message}</Badge>
+    : status === 'ready' && message
+      ? <span className="text-xs text-muted-foreground">{message}</span>
+      : null;
+
   return (
-    <div className={cn('min-h-screen text-slate-950', sourceSans.className)}>
-      <div className="relative overflow-hidden bg-gradient-to-br from-amber-50 via-white to-sky-100">
-        <div className="pointer-events-none absolute inset-0">
-          <div className="absolute -top-24 right-[-10%] h-72 w-72 rounded-full bg-amber-200/40 blur-3xl" />
-          <div className="absolute bottom-[-20%] left-[-10%] h-72 w-72 rounded-full bg-sky-200/50 blur-3xl" />
-          <div className="absolute top-24 left-1/2 h-40 w-40 -translate-x-1/2 rounded-2xl bg-white/50 backdrop-blur-sm" />
+    <div className="flex flex-col flex-1 overflow-hidden bg-background">
+
+      {/* ── Toolbar ── */}
+      <div className="flex items-center gap-2 px-4 py-2.5 border-b bg-white shrink-0 flex-wrap">
+        <label
+          className={cn(
+            'inline-flex items-center gap-1.5 h-8 px-3 rounded-md border text-sm cursor-pointer transition-colors',
+            sourceFile
+              ? 'border-primary/30 bg-primary/5 text-primary font-medium'
+              : 'border-input bg-background text-muted-foreground hover:bg-accent',
+          )}
+        >
+          <Upload className="h-3.5 w-3.5" />
+          <span className="max-w-[160px] truncate">{sourceFile ? sourceFile.name : 'Choose DOCX'}</span>
+          <input type="file" accept=".docx" className="sr-only" onChange={handleFileChange} />
+        </label>
+
+        <label className="inline-flex items-center gap-2 h-8 px-3 rounded-md border border-input bg-background text-sm cursor-pointer hover:bg-accent transition-colors">
+          <input
+            type="checkbox"
+            checked={useAI}
+            onChange={(e) => setUseAI(e.target.checked)}
+            className="h-4 w-4 rounded"
+          />
+          <span className="text-muted-foreground">AI</span>
+        </label>
+
+        <Button
+          size="sm"
+          className="bg-sky-500 hover:bg-sky-600 text-white border-0"
+          onClick={() => void handleExtract()}
+          disabled={!sourceFile || !PRESIGN_URL || isBusy}
+        >
+          <Wand2 className="h-3.5 w-3.5" />
+          {status === 'uploading' ? 'Uploading…' : status === 'extracting' ? 'Extracting…' : 'Extract Fields'}
+        </Button>
+
+        <Separator orientation="vertical" className="h-5 mx-1 hidden sm:block" />
+
+        {statusBadge}
+
+        <div className="ml-auto flex items-center gap-2">
+          {fields.length > 0 && (
+            <span className="text-xs text-muted-foreground hidden sm:inline">
+              {counts.filled}/{counts.total} filled
+            </span>
+          )}
+
+          {hasErrors && (
+            <span className="text-xs text-red-500 flex items-center gap-1">
+              <AlertCircle className="h-3 w-3" />
+              <span className="hidden sm:inline">Fix errors</span>
+            </span>
+          )}
+
+          {exportStatus === 'error' && (
+            <span className="text-xs text-red-500 hidden sm:inline">{exportMessage}</span>
+          )}
+          {exportStatus === 'done' && !hasErrors && (
+            <span className="text-xs text-muted-foreground hidden sm:inline">{exportMessage}</span>
+          )}
+
+          <Button
+            variant="outline"
+            size="sm"
+            className="border-emerald-200 text-emerald-700 hover:bg-emerald-50"
+            onClick={() => void handleExport()}
+            disabled={fields.length === 0 || hasErrors || exportStatus === 'exporting'}
+          >
+            <Download className="h-3.5 w-3.5" />
+            <span className="hidden sm:inline">
+              {exportStatus === 'exporting' ? 'Exporting…' : 'Export DOCX'}
+            </span>
+          </Button>
+
+          {downloadUrl && (
+            <a
+              href={downloadUrl}
+              download
+              className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md border border-emerald-300 bg-emerald-50 text-sm text-emerald-700 hover:bg-emerald-100 transition-colors"
+            >
+              <FileCheck className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">Download</span>
+            </a>
+          )}
         </div>
+      </div>
 
-        <div className="relative mx-auto flex w-full max-w-6xl flex-col gap-10 px-6 py-10 lg:py-14">
-          <header className="flex flex-col gap-4">
-            <div className="inline-flex items-center gap-2 text-xs uppercase tracking-[0.2em] text-slate-500">
-              <Sparkles className="h-4 w-4" />
-              Form Extraction Lab
+      {/* ── Field grid ── */}
+      <div className="flex-1 overflow-y-auto p-4 bg-muted/20">
+        {fields.length === 0 ? (
+          <div className="flex flex-col items-center justify-center h-full gap-3 text-center p-8">
+            <div className="rounded-full bg-muted p-4">
+              <FileCheck className="h-8 w-8 text-muted-foreground" />
             </div>
-            <div className="flex flex-col gap-3">
-              <h1 className={cn('text-3xl font-semibold text-slate-900 md:text-4xl', spaceGrotesk.className)}>
-                Upload a DOCX, extract fields, and start filling.
-              </h1>
-              <p className="max-w-2xl text-base text-slate-600">
-                This page handles upload and automatic extraction (rules only). Fields are listed below so you can
-                enter values without altering labels or types.
-              </p>
-            </div>
-          </header>
-
-          <div className="grid gap-6 lg:grid-cols-[360px_1fr]">
-            <section className="rounded-2xl border border-slate-200 bg-white/90 p-6 shadow-sm backdrop-blur">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h2 className={cn('text-lg font-semibold', spaceGrotesk.className)}>Upload & Extract</h2>
-                  <p className="text-sm text-slate-500">DOCX only · AI disabled</p>
-                </div>
-                <Badge variant="secondary" className="bg-slate-100 text-slate-600">Phase 1</Badge>
-              </div>
-
-              <div className="mt-5 flex flex-col gap-4">
-                <label className="flex cursor-pointer flex-col gap-2 rounded-xl border border-dashed border-slate-300 bg-slate-50 px-4 py-5 text-sm text-slate-600 hover:border-slate-400">
-                  <div className="flex items-center gap-2 text-slate-700">
-                    <UploadCloud className="h-4 w-4" />
-                    <span>{sourceFile ? sourceFile.name : 'Choose a DOCX file'}</span>
-                  </div>
-                  <span className="text-xs text-slate-500">Maximum size depends on your S3 settings.</span>
-                  <input type="file" accept=".docx" className="sr-only" onChange={handleFileChange} />
-                </label>
-
-                <Button
-                  className="h-10 bg-slate-900 text-white hover:bg-slate-800"
-                  onClick={() => void handleExtract()}
-                  disabled={!sourceFile || !PRESIGN_URL || isBusy}
-                >
-                  {status === 'extracting' ? 'Extracting…' : status === 'uploading' ? 'Uploading…' : 'Extract Fields'}
-                </Button>
-
-                <div className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-600">
-                  <div className="flex items-center gap-2">
-                    <FileCheck className="h-4 w-4 text-emerald-500" />
-                    <span>{message || 'Ready to extract fields.'}</span>
-                  </div>
-                  {uploadKey && (
-                    <div className="mt-2 text-xs text-slate-400">Upload key: {uploadKey}</div>
-                  )}
-                </div>
-              </div>
-            </section>
-
-            <section className="rounded-2xl border border-slate-200 bg-white/95 p-6 shadow-sm backdrop-blur">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <h2 className={cn('text-lg font-semibold', spaceGrotesk.className)}>Extracted Fields</h2>
-                  <p className="text-sm text-slate-500">Edit values only. Labels and types stay locked.</p>
-                </div>
-                <div className="flex items-center gap-2 text-sm text-slate-500">
-                  <Badge variant="outline" className="border-slate-200 text-slate-500">
-                    {counts.filled}/{counts.total} filled
-                  </Badge>
-                  <Badge variant="secondary" className="bg-amber-100 text-amber-700">
-                    Phase 2
-                  </Badge>
-                </div>
-              </div>
-
-              <div className="mt-5 grid gap-4">
-                {fields.length === 0 && (
-                  <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-8 text-center text-sm text-slate-500">
-                    Upload a document to see extracted fields.
-                  </div>
-                )}
-
-                {fields.map((field, index) => {
-                  const error = fieldErrors[index];
-                  const isAI = (field.confidence ?? 1) <= 0.5;
-                  return (
-                    <div
-                      key={field.id ?? `${field.label}-${index}`}
-                      className={cn('rounded-xl border bg-white px-4 py-4', error ? 'border-red-300' : 'border-slate-200')}
-                    >
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <div>
-                          <div className="text-sm font-semibold text-slate-900">{field.label}</div>
-                          <div className="text-xs text-slate-500">{field.type}</div>
-                        </div>
-                        <div className="flex items-center gap-1.5">
-                          <Badge
-                            variant="outline"
-                            className={cn(
-                              'border text-xs',
-                              isAI
-                                ? 'border-purple-200 bg-purple-50 text-purple-600'
-                                : 'border-slate-200 text-slate-500',
-                            )}
-                          >
-                            {isAI ? 'AI' : 'rule'} · {Math.round((field.confidence ?? 0) * 100)}%
-                          </Badge>
-                        </div>
-                      </div>
-
-                      <div className="mt-3">
-                        {field.type === 'checkbox' ? (
-                          <label className="flex items-center gap-2 text-sm text-slate-600">
-                            <input
-                              type="checkbox"
-                              checked={Boolean(field.value)}
-                              onChange={(e) => updateFieldValue(index, e.target.checked)}
-                              className="h-4 w-4 rounded border-slate-300"
-                            />
-                            Mark as checked
-                          </label>
-                        ) : field.type === 'multiline' ? (
-                          <textarea
-                            className={cn(
-                              'min-h-[96px] w-full rounded-lg border px-3 py-2 text-sm focus:outline-none',
-                              error ? 'border-red-300 focus:border-red-400' : 'border-slate-200 focus:border-slate-400',
-                            )}
-                            value={String(field.value ?? '')}
-                            onChange={(e) => updateFieldValue(index, e.target.value)}
-                          />
-                        ) : (
-                          <input
-                            type="text"
-                            className={cn(
-                              'w-full rounded-lg border px-3 py-2 text-sm focus:outline-none',
-                              error ? 'border-red-300 focus:border-red-400' : 'border-slate-200 focus:border-slate-400',
-                            )}
-                            value={String(field.value ?? '')}
-                            onChange={(e) => updateFieldValue(index, e.target.value)}
-                          />
-                        )}
-                        {error && <p className="mt-1 text-xs text-red-500">{error}</p>}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </section>
+            <p className="text-sm text-muted-foreground max-w-xs">
+              Choose a <strong>.docx</strong> file and click <strong>Extract Fields</strong> to list editable form fields.
+            </p>
           </div>
-
-          {/* Phase 3 + 4: Export */}
-          <section className="rounded-2xl border border-slate-200 bg-white/90 p-6 shadow-sm backdrop-blur">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <h2 className={cn('text-lg font-semibold', spaceGrotesk.className)}>Export DOCX</h2>
-                <p className="text-sm text-slate-500">Patches field values into the original document.</p>
-              </div>
-              <Badge variant="secondary" className="bg-sky-100 text-sky-700">Phase 3 + 4</Badge>
-            </div>
-
-            <div className="mt-5 flex flex-wrap items-center gap-4">
-              <Button
-                className="h-10 bg-slate-900 text-white hover:bg-slate-800"
-                onClick={() => void handleExport()}
-                disabled={fields.length === 0 || hasErrors || exportStatus === 'exporting'}
-              >
-                {exportStatus === 'exporting' ? 'Exporting…' : 'Export & Download'}
-              </Button>
-
-              {hasErrors && (
-                <span className="text-sm text-red-500">Fix validation errors above before exporting.</span>
-              )}
-
-              {!hasErrors && exportMessage && (
-                <span className={cn('text-sm', exportStatus === 'error' ? 'text-red-600' : 'text-slate-500')}>
-                  {exportMessage}
-                </span>
-              )}
-
-              {downloadUrl && (
-                <a
-                  href={downloadUrl}
-                  download
-                  className="inline-flex h-10 items-center gap-2 rounded-lg border border-emerald-300 bg-emerald-50 px-4 text-sm font-medium text-emerald-700 hover:bg-emerald-100"
+        ) : (
+          <div className="grid gap-3 max-w-5xl mx-auto sm:grid-cols-2 lg:grid-cols-3">
+            {fields.map((field, index) => {
+              const error = fieldErrors[index];
+              const isAI = (field.confidence ?? 1) <= 0.5;
+              return (
+                <div
+                  key={field.id ?? `${field.label}-${index}`}
+                  className={cn(
+                    'rounded-lg border bg-white p-4',
+                    error ? 'border-red-300' : 'border-border',
+                  )}
                 >
-                  <FileCheck className="h-4 w-4" />
-                  Download patched DOCX
-                </a>
-              )}
-            </div>
-          </section>
-        </div>
+                  <div className="flex items-start justify-between gap-2 mb-3">
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium truncate">{field.label}</div>
+                      <div className="text-xs text-muted-foreground">{field.type}</div>
+                    </div>
+                    <Badge
+                      variant="outline"
+                      className={cn(
+                        'text-xs shrink-0',
+                        isAI
+                          ? 'border-purple-200 bg-purple-50 text-purple-600'
+                          : 'text-muted-foreground',
+                      )}
+                    >
+                      {isAI ? 'AI' : 'rule'} · {Math.round((field.confidence ?? 0) * 100)}%
+                    </Badge>
+                  </div>
+
+                  {field.type === 'checkbox' ? (
+                    <label className="flex items-center gap-2 text-sm text-muted-foreground cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(field.value)}
+                        onChange={(e) => updateFieldValue(index, e.target.checked)}
+                        className="h-4 w-4 rounded border-input"
+                      />
+                      Checked
+                    </label>
+                  ) : field.type === 'multiline' ? (
+                    <textarea
+                      className={cn(
+                        'min-h-[72px] w-full rounded-md border px-3 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring',
+                        error ? 'border-red-300' : 'border-input',
+                      )}
+                      value={String(field.value ?? '')}
+                      onChange={(e) => updateFieldValue(index, e.target.value)}
+                    />
+                  ) : (
+                    <input
+                      type="text"
+                      className={cn(
+                        'w-full rounded-md border px-3 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring',
+                        error ? 'border-red-300' : 'border-input',
+                      )}
+                      value={String(field.value ?? '')}
+                      onChange={(e) => updateFieldValue(index, e.target.value)}
+                    />
+                  )}
+                  {error && <p className="mt-1 text-xs text-red-500">{error}</p>}
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
     </div>
   );

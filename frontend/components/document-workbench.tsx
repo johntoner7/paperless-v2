@@ -330,40 +330,32 @@ export default function DocumentWorkbench() {
   }[status];
 
   return (
-    <div className="flex flex-col h-screen bg-background">
+    <div className="flex flex-col flex-1 overflow-hidden bg-background">
 
-      {/* ── Top nav ── */}
-      <header className="flex items-center gap-3 px-4 h-14 border-b bg-white shrink-0">
-        <div className="flex items-center gap-2 text-sm font-semibold">
-          <FileText className="h-4 w-4 text-muted-foreground" />
-          Paperless
-        </div>
-
-        <Separator orientation="vertical" className="h-5 hidden sm:block" />
-
+      {/* ── Document actions bar ── */}
+      <header className="flex items-center gap-3 px-4 h-10 border-b bg-white shrink-0">
         {docTitle
-          ? <span className="text-sm text-muted-foreground truncate max-w-[120px] sm:max-w-xs hidden sm:block">{docTitle}</span>
-          : <span className="text-sm text-muted-foreground/50 italic hidden sm:block">No document open</span>
+          ? <span className="text-sm text-muted-foreground truncate max-w-[160px] sm:max-w-xs">{docTitle}</span>
+          : <span className="text-sm text-muted-foreground/40 italic">No document open</span>
         }
-
         <div className="ml-auto flex items-center gap-2">
           {statusBadge}
           {savedAt && <span className="text-xs text-muted-foreground hidden sm:block">Saved {savedAt}</span>}
-          <Button variant="outline" size="sm" className="border-sky-200 text-sky-700 hover:bg-sky-50" onClick={() => void handleSave()} disabled={!isReady}>
-            <Save className="h-3.5 w-3.5" />
+          <Button variant="outline" size="sm" className="border-sky-200 text-sky-700 hover:bg-sky-50 h-7 text-xs" onClick={() => void handleSave()} disabled={!isReady}>
+            <Save className="h-3 w-3" />
             <span className="hidden sm:inline">Save HTML</span>
           </Button>
           <Button
             variant="outline" size="sm"
-            className="border-emerald-200 text-emerald-700 hover:bg-emerald-50"
+            className="border-emerald-200 text-emerald-700 hover:bg-emerald-50 h-7 text-xs"
             onClick={() => void handleExportDocx()}
             disabled={!isReady || !originalKey}
           >
-            <Download className="h-3.5 w-3.5" />
+            <Download className="h-3 w-3" />
             <span className="hidden sm:inline">Export DOCX</span>
           </Button>
-          <Button size="sm" className="bg-sky-500 hover:bg-sky-600 text-white border-0" onClick={() => void handlePdf()} disabled={!isReady}>
-            <Download className="h-3.5 w-3.5" />
+          <Button size="sm" className="bg-sky-500 hover:bg-sky-600 text-white border-0 h-7 text-xs" onClick={() => void handlePdf()} disabled={!isReady}>
+            <Download className="h-3 w-3" />
             <span className="hidden sm:inline">PDF</span>
           </Button>
         </div>
