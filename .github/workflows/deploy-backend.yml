@@ -39,16 +39,19 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Set up Python 3.11 for packaging
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
       - name: Package and deploy presign handler
         run: |
           mkdir -p presign-package
-          python3 -m pip install --upgrade pip
-          python3 -m pip install -r backend/requirements.txt -t presign-package
+          # LAMBDA_PYTHON must match the presign Lambda's configured runtime.
+          # Check: aws lambda get-function-configuration --function-name paperless-presign --query Runtime
+          LAMBDA_PYTHON=3.12
+          pip install \
+            --platform manylinux2014_x86_64 \
+            --implementation cp \
+            --python-version $LAMBDA_PYTHON \
+            --only-binary=:all: \
+            -r backend/requirements-presign.txt \
+            -t presign-package/
           cp backend/presign_handler.py backend/docx_writer.py backend/docx_node_ids.py backend/docx_ast.py backend/field_extractor.py presign-package/
           (cd presign-package && zip -r ../presign.zip .)
           aws lambda update-function-code \
