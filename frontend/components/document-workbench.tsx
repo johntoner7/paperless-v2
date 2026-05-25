@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import {
   FileText, Upload, Wand2, RefreshCw, SplitSquareHorizontal, X,
   Download, Save, BookOpen, ChevronDown,
@@ -9,9 +9,12 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
 import { AlertBanner } from '@/components/ui/alert-banner';
+import { FieldPanel } from '@/components/field-panel';
+import type { ExtractedField } from '@/components/field-panel';
 import { cn } from '@/lib/utils';
 
 type ConversionState = 'idle' | 'converting' | 'ready' | 'error';
+type ExtractStatus = 'idle' | 'extracting' | 'ready' | 'error';
 type LibraryUpload = {
   key: string;
   fileName: string;
@@ -84,26 +87,84 @@ function DocxPane({ url }: { url: string }) {
   );
 }
 
+type HtmlEditorHandle = {
+  updateNode: (nodeId: string, text: string) => void;
+  getHtml: () => string;
+};
+
 /* ── HTML editor ────────────────────────────── */
-function HtmlEditor({ initialHtml, onChange }: { initialHtml: string; onChange: (h: string) => void }) {
-  const ref = useRef<HTMLDivElement>(null);
+const HtmlEditor = forwardRef<HtmlEditorHandle, {
+  initialHtml: string;
+  onChange: (h: string) => void;
+  onNodeChange?: (nodeId: string, text: string) => void;
+}>(
+  function HtmlEditor({ initialHtml, onChange, onNodeChange }, ref) {
+    const divRef = useRef<HTMLDivElement>(null);
+    const isSyncingRef = useRef(false);
+    const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  useEffect(() => {
-    if (ref.current && ref.current.innerHTML !== initialHtml) {
-      ref.current.innerHTML = initialHtml;
-    }
-  }, [initialHtml]);
+    useImperativeHandle(ref, () => ({
+      updateNode(nodeId: string, text: string) {
+        const el = divRef.current?.querySelector(`[data-node-id="${nodeId}"]`);
+        if (!el) return;
+        isSyncingRef.current = true;
+        el.textContent = text;
+        // Reset after MutationObserver microtask fires (Promise queues after it)
+        void Promise.resolve().then(() => { isSyncingRef.current = false; });
+      },
+      getHtml() {
+        return divRef.current?.innerHTML ?? '';
+      },
+    }));
 
-  return (
-    <div
-      ref={ref}
-      className="editor-prose"
-      contentEditable
-      suppressContentEditableWarning
-      onInput={() => ref.current && onChange(ref.current.innerHTML)}
-    />
-  );
-}
+    useEffect(() => {
+      if (divRef.current && divRef.current.innerHTML !== initialHtml) {
+        divRef.current.innerHTML = initialHtml;
+      }
+    }, [initialHtml]);
+
+    useEffect(() => {
+      const el = divRef.current;
+      if (!el || !onNodeChange) return;
+
+      const observer = new MutationObserver((mutations) => {
+        if (isSyncingRef.current) return;
+        for (const mutation of mutations) {
+          const target = mutation.type === 'characterData'
+            ? mutation.target.parentElement
+            : (mutation.target instanceof Element ? mutation.target : null);
+          if (!target) continue;
+
+          const run = target.closest('[data-node-kind="run"]');
+          if (!run) continue;
+
+          const nodeId = run.getAttribute('data-node-id');
+          if (!nodeId) continue;
+
+          const text = run.textContent ?? '';
+          if (debounceRef.current) clearTimeout(debounceRef.current);
+          debounceRef.current = setTimeout(() => onNodeChange(nodeId, text), 300);
+        }
+      });
+
+      observer.observe(el, { characterData: true, childList: true, subtree: true });
+      return () => {
+        observer.disconnect();
+        if (debounceRef.current) clearTimeout(debounceRef.current);
+      };
+    }, [onNodeChange]);
+
+    return (
+      <div
+        ref={divRef}
+        className="editor-prose"
+        contentEditable
+        suppressContentEditableWarning
+        onInput={() => divRef.current && onChange(divRef.current.innerHTML)}
+      />
+    );
+  }
+);
 
 /* ── Main workbench ─────────────────────────── */
 export default function DocumentWorkbench() {
@@ -122,7 +183,96 @@ export default function DocumentWorkbench() {
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [useAI, setUseAI] = useState(false);
   const [notification, setNotification] = useState<{ type: 'error' | 'success'; message: string } | null>(null);
+  const [fields, setFields] = useState<ExtractedField[]>([]);
+  const [extractStatus, setExtractStatus] = useState<ExtractStatus>('idle');
+  const [mode, setMode] = useState<'html' | 'fields'>('html');
+  const [exportBusy, setExportBusy] = useState(false);
+  const [exportDownloadUrl, setExportDownloadUrl] = useState<string | null>(null);
   const skipRestoreRef = useRef(false);
+  const statusRef = useRef(status);
+  const editorRef = useRef<HtmlEditorHandle>(null);
+  useEffect(() => { statusRef.current = status; }, [status]);
+
+  async function runExtract(key: string) {
+    setExtractStatus('extracting');
+    setFields([]);
+    setExportDownloadUrl(null);
+    try {
+      const resp = await fetch(`${PRESIGN_URL}?action=extract`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key, useAI }),
+      });
+      if (!resp.ok) throw new Error(`Extract failed (${resp.status})`);
+      const data = await resp.json() as { fields?: ExtractedField[] };
+      setFields((data.fields ?? []).map((f, idx) => ({
+        id: f.id ?? `field_${idx + 1}`,
+        label: f.label,
+        type: f.type,
+        value: f.value ?? (f.type === 'checkbox' ? false : ''),
+        confidence: f.confidence ?? 0,
+        source: f.source,
+      })));
+      setExtractStatus('ready');
+      if (statusRef.current !== 'ready') setMode('fields');
+    } catch {
+      setExtractStatus('error');
+    }
+  }
+
+  function updateFieldValue(index: number, value: string | boolean) {
+    setFields(prev => prev.map((f, i) => i === index ? { ...f, value } : f));
+
+    const field = fields[index];
+    if (field.type !== 'checkbox' && typeof value === 'string') {
+      const nodeIds = field.source?.nodeIds ?? [];
+      const targetId = nodeIds.filter(id => id.startsWith('r_')).at(-1);
+      if (targetId && editorRef.current) {
+        editorRef.current.updateNode(targetId, value);
+        setHtmlDraft(editorRef.current.getHtml());
+      }
+    }
+  }
+
+  function handleNodeChange(nodeId: string, text: string) {
+    setFields(prev => prev.map(f => {
+      const targetId = (f.source?.nodeIds ?? []).filter(id => id.startsWith('r_')).at(-1);
+      return targetId === nodeId ? { ...f, value: text } : f;
+    }));
+  }
+
+  function buildPatches(fieldList: ExtractedField[]) {
+    const patches: object[] = [];
+    for (const field of fieldList) {
+      const nodeIds = field.source?.nodeIds ?? [];
+      if (field.type === 'checkbox') {
+        const sdtId = nodeIds.find(id => id.startsWith('sdt_'));
+        if (sdtId) patches.push({ node_id: sdtId, operation: 'toggle_checkbox', checked: Boolean(field.value) });
+      } else {
+        const val = field.value;
+        if (val === null || val === '') continue;
+        const runIds = nodeIds.filter(id => id.startsWith('r_'));
+        const targetId = runIds[runIds.length - 1];
+        if (targetId) patches.push({ node_id: targetId, operation: 'replace_text', text: String(val) });
+      }
+    }
+    return patches;
+  }
+
+  function buildPatchesFromHtml(html: string) {
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const patches: Array<Record<string, unknown>> = [];
+    doc.querySelectorAll('[data-node-kind="run"][data-node-id]').forEach(el => {
+      const nodeId = el.getAttribute('data-node-id');
+      if (!nodeId) return;
+      if (el.querySelector('[data-type="checkbox"]')) {
+        patches.push({ node_id: nodeId, operation: 'toggle_checkbox', checked: el.textContent?.includes('☒') ?? false });
+      } else {
+        patches.push({ node_id: nodeId, operation: 'replace_text', text: el.textContent ?? '' });
+      }
+    });
+    return patches;
+  }
 
   async function responseError(resp: Response, fallback: string): Promise<string> {
     try {
@@ -185,6 +335,8 @@ export default function DocumentWorkbench() {
       });
       if (!up.ok) throw new Error(`Upload failed (${up.status})`);
 
+      void runExtract(key);
+
       if (useAI) {
         const convResp = await fetch(PRESIGN_URL, {
           method: 'POST',
@@ -241,6 +393,7 @@ export default function DocumentWorkbench() {
       setDocxSource(result.originalUrl ?? null); setOriginalKey(key); setShowCompare(false);
       setSelectedKey(key); setStatus('ready');
       setNotification({ type: 'success', message: `Opened ${entry.fileName}` });
+      void runExtract(key);
       setSavedAt(null);
       localStorage.setItem(`pb:draft:${title}`, html);
     } catch (e) {
@@ -287,28 +440,14 @@ export default function DocumentWorkbench() {
   }
 
   async function handleExportDocx() {
-    if (!originalKey || status !== 'ready') return;
+    if (!originalKey) return;
     setNotification(null);
+    setExportBusy(true);
+    setExportDownloadUrl(null);
     try {
-      const parser = new DOMParser();
-      const doc = parser.parseFromString(htmlDraft, 'text/html');
-      const patches: Array<Record<string, unknown>> = [];
-
-      doc.querySelectorAll('[data-node-kind="run"][data-node-id]').forEach(el => {
-        const nodeId = el.getAttribute('data-node-id');
-        if (!nodeId) return;
-        const patch: Record<string, unknown> = {
-          node_id: nodeId,
-          operation: el.querySelector('[data-type="checkbox"]') ? 'toggle_checkbox' : 'replace_text',
-        };
-        if (patch.operation === 'toggle_checkbox') {
-          patch.checked = el.textContent?.includes('☒') ?? false;
-        } else {
-          patch.text = el.textContent ?? '';
-        }
-        patches.push(patch);
-      });
-
+      const patches = fields.length > 0
+        ? buildPatches(fields)
+        : buildPatchesFromHtml(htmlDraft);
       const resp = await fetch(`${PRESIGN_URL}?action=export-docx`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -316,17 +455,12 @@ export default function DocumentWorkbench() {
       });
       if (!resp.ok) throw new Error(await responseError(resp, `Export failed (${resp.status})`));
       const { url } = await resp.json() as { url: string };
-
-      const a = Object.assign(document.createElement('a'), {
-        href: url,
-        download: `${docTitle || 'document'}-exported.docx`,
-      });
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setNotification({ type: 'success', message: 'DOCX exported.' });
+      setExportDownloadUrl(url);
+      setNotification({ type: 'success', message: `${patches.length} patch${patches.length !== 1 ? 'es' : ''} applied — ready to download.` });
     } catch (e) {
       setNotification({ type: 'error', message: e instanceof Error ? e.message : 'Export failed.' });
+    } finally {
+      setExportBusy(false);
     }
   }
 
@@ -335,6 +469,14 @@ export default function DocumentWorkbench() {
 
   const convertingBadge = status === 'converting'
     ? <Badge variant="warning" className="animate-pulse">Converting…</Badge>
+    : null;
+
+  const extractBadge = extractStatus === 'extracting'
+    ? <Badge variant="outline" className="animate-pulse text-purple-600 border-purple-200 bg-purple-50">Extracting fields…</Badge>
+    : extractStatus === 'ready' && fields.length > 0
+    ? <Badge variant="outline" className="text-purple-600 border-purple-200 bg-purple-50">{fields.length} fields</Badge>
+    : extractStatus === 'error'
+    ? <Badge variant="outline" className="text-red-500 border-red-200 bg-red-50">Fields failed</Badge>
     : null;
 
   return (
@@ -348,6 +490,7 @@ export default function DocumentWorkbench() {
         }
         <div className="ml-auto flex items-center gap-2">
           {convertingBadge}
+          {extractBadge}
           {savedAt && <span className="text-xs text-muted-foreground hidden sm:block">Saved {savedAt}</span>}
           <Button variant="outline" size="sm" className="border-sky-200 text-sky-700 hover:bg-sky-50 h-7 text-xs" onClick={() => void handleSave()} disabled={!isReady}>
             <Save className="h-3 w-3" />
@@ -357,11 +500,21 @@ export default function DocumentWorkbench() {
             variant="outline" size="sm"
             className="border-emerald-200 text-emerald-700 hover:bg-emerald-50 h-7 text-xs"
             onClick={() => void handleExportDocx()}
-            disabled={!isReady || !originalKey}
+            disabled={!originalKey || exportBusy}
           >
             <Download className="h-3 w-3" />
-            <span className="hidden sm:inline">Export DOCX</span>
+            <span className="hidden sm:inline">{exportBusy ? 'Exporting…' : 'Export DOCX'}</span>
           </Button>
+          {exportDownloadUrl && (
+            <a
+              href={exportDownloadUrl}
+              download
+              className="inline-flex items-center gap-1 h-7 px-2 rounded border border-emerald-300 bg-emerald-50 text-xs text-emerald-700 hover:bg-emerald-100 transition-colors"
+            >
+              <Download className="h-3 w-3" />
+              <span className="hidden sm:inline">Download</span>
+            </a>
+          )}
           <Button size="sm" className="bg-sky-500 hover:bg-sky-600 text-white border-0 h-7 text-xs" onClick={() => void handlePdf()} disabled={!isReady}>
             <Download className="h-3 w-3" />
             <span className="hidden sm:inline">PDF</span>
@@ -451,7 +604,7 @@ export default function DocumentWorkbench() {
           <RefreshCw className="h-3.5 w-3.5" />
         </Button>
 
-        {canCompare && (
+        {canCompare && mode === 'html' && (
           <>
             <Separator orientation="vertical" className="h-5 mx-1 hidden sm:block" />
             <Button
@@ -467,6 +620,36 @@ export default function DocumentWorkbench() {
             </Button>
           </>
         )}
+
+        <Separator orientation="vertical" className="h-5 mx-1 hidden sm:block" />
+        <div className="flex rounded-md border border-input overflow-hidden text-sm">
+          <button
+            className={cn(
+              'h-8 px-3 transition-colors',
+              mode === 'html' ? 'bg-sky-500 text-white' : 'bg-background text-muted-foreground hover:bg-accent',
+            )}
+            onClick={() => setMode('html')}
+          >
+            HTML
+          </button>
+          <button
+            className={cn(
+              'h-8 px-3 transition-colors flex items-center gap-1.5 border-l border-input',
+              mode === 'fields' ? 'bg-sky-500 text-white' : 'bg-background text-muted-foreground hover:bg-accent',
+            )}
+            onClick={() => setMode('fields')}
+          >
+            Fields
+            {fields.length > 0 && (
+              <span className={cn(
+                'text-xs rounded-full min-w-[18px] text-center px-1',
+                mode === 'fields' ? 'bg-white/20 text-white' : 'bg-muted text-muted-foreground',
+              )}>
+                {fields.length}
+              </span>
+            )}
+          </button>
+        </div>
       </div>
 
       {/* ── Notification banner ── */}
@@ -479,11 +662,12 @@ export default function DocumentWorkbench() {
       )}
 
       {/* ── Workspace ── */}
-      <div className="flex flex-1 overflow-hidden gap-0">
+      <div className="flex flex-1 overflow-hidden">
 
-        {/* original DOCX pane — hidden on mobile even if showCompare is true */}
-        {showCompare && docxSource && (
-          <>
+        {/* HTML view */}
+        <div className={cn('flex-1 overflow-hidden', mode === 'html' ? 'flex gap-0' : 'hidden')}>
+          {/* original DOCX pane */}
+          {showCompare && docxSource && (
             <div className="hidden sm:flex flex-col flex-1 overflow-hidden border-r">
               <div className="flex items-center gap-2 px-4 h-10 border-b bg-muted/30 shrink-0">
                 <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Original DOCX</span>
@@ -493,40 +677,50 @@ export default function DocumentWorkbench() {
                 <DocxPane url={docxSource} />
               </div>
             </div>
-          </>
-        )}
+          )}
 
-        {/* HTML editor pane */}
-        <div className="flex flex-col flex-1 overflow-hidden">
-          <div className="flex items-center gap-2 px-4 h-10 border-b bg-muted/30 shrink-0">
-            <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Converted HTML</span>
-            {docTitle && <span className="text-xs text-muted-foreground">· {docTitle}</span>}
-            {isReady && <Badge variant="outline" className="ml-auto text-[10px] text-muted-foreground">editable</Badge>}
-          </div>
+          {/* HTML editor pane */}
+          <div className="flex flex-col flex-1 overflow-hidden">
+            <div className="flex items-center gap-2 px-4 h-10 border-b bg-muted/30 shrink-0">
+              <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Converted HTML</span>
+              {docTitle && <span className="text-xs text-muted-foreground">· {docTitle}</span>}
+              {isReady && <Badge variant="outline" className="ml-auto text-[10px] text-muted-foreground">editable</Badge>}
+            </div>
 
-          <div className="flex-1 overflow-hidden">
-            {!isReady && !htmlDraft ? (
-              <div className="flex flex-col items-center justify-center h-full gap-3 text-center p-8">
-                <div className="rounded-full bg-muted p-4">
-                  <FileText className="h-8 w-8 text-muted-foreground" />
+            <div className="flex-1 overflow-hidden">
+              {!isReady && !htmlDraft ? (
+                <div className="flex flex-col items-center justify-center h-full gap-3 text-center p-8">
+                  <div className="rounded-full bg-muted p-4">
+                    <FileText className="h-8 w-8 text-muted-foreground" />
+                  </div>
+                  <p className="text-sm text-muted-foreground max-w-xs">
+                    Choose a <strong>.docx</strong> file and click <strong>Convert</strong>, or open a document from the Library.
+                  </p>
                 </div>
-                <p className="text-sm text-muted-foreground max-w-xs">
-                  Choose a <strong>.docx</strong> file and click <strong>Convert</strong>, or open a document from the Library.
-                </p>
-              </div>
-            ) : (
-              <div className="document-pane h-full">
-                <HtmlEditor
-                  key={docTitle}
-                  initialHtml={htmlDraft}
-                  onChange={h => {
-                    setHtmlDraft(h);
-                    localStorage.setItem(draftKey, h);
-                  }}
-                />
-              </div>
-            )}
+              ) : (
+                <div className="document-pane h-full">
+                  <HtmlEditor
+                    ref={editorRef}
+                    key={docTitle}
+                    initialHtml={htmlDraft}
+                    onChange={h => {
+                      setHtmlDraft(h);
+                      localStorage.setItem(draftKey, h);
+                    }}
+                    onNodeChange={handleNodeChange}
+                  />
+                </div>
+              )}
+            </div>
           </div>
+        </div>
+
+        {/* Fields view */}
+        <div className={cn('flex-1 overflow-hidden', mode === 'fields' ? 'flex flex-col' : 'hidden')}>
+          <FieldPanel
+            fields={fields}
+            onFieldChange={updateFieldValue}
+          />
         </div>
       </div>
 
