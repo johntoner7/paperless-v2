@@ -181,7 +181,8 @@ export default function DocumentWorkbench() {
   const [originalKey, setOriginalKey] = useState<string | null>(null);
   const [showCompare, setShowCompare] = useState(false);
   const [libraryOpen, setLibraryOpen] = useState(false);
-  const [useAI, setUseAI] = useState(false);
+  const [useAIConvert, setUseAIConvert] = useState(false);
+  const [useAIExtract, setUseAIExtract] = useState(true);
   const [notification, setNotification] = useState<{ type: 'error' | 'success'; message: string } | null>(null);
   const [fields, setFields] = useState<ExtractedField[]>([]);
   const [extractStatus, setExtractStatus] = useState<ExtractStatus>('idle');
@@ -203,7 +204,7 @@ export default function DocumentWorkbench() {
       const resp = await fetch(`${PRESIGN_URL}?action=extract`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key, useAI, force }),
+        body: JSON.stringify({ key, useAI: useAIExtract, force }),
       });
       if (!resp.ok) throw new Error(`Extract failed (${resp.status})`);
       const data = await resp.json() as { fields?: ExtractedField[] };
@@ -326,7 +327,7 @@ export default function DocumentWorkbench() {
     const convResp = await fetch(`${PRESIGN_URL}?action=convert`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ key, useAI }),
+      body: JSON.stringify({ key, useAI: useAIConvert }),
     });
     if (!convResp.ok) console.warn('Failed to invoke renderer, will rely on S3 events');
     for (let i = 0; i < 60; i++) {
@@ -610,8 +611,13 @@ export default function DocumentWorkbench() {
         </label>
 
         <label className="inline-flex items-center gap-2 h-8 px-3 rounded-md border border-input bg-background text-sm cursor-pointer hover:bg-accent transition-colors">
-          <input type="checkbox" checked={useAI} onChange={e => setUseAI(e.target.checked)} className="w-4 h-4 rounded" />
-          <span className="text-muted-foreground">AI</span>
+          <input type="checkbox" checked={useAIConvert} onChange={e => setUseAIConvert(e.target.checked)} className="w-4 h-4 rounded" />
+          <span className="text-muted-foreground">AI Convert</span>
+        </label>
+
+        <label className="inline-flex items-center gap-2 h-8 px-3 rounded-md border border-input bg-background text-sm cursor-pointer hover:bg-accent transition-colors">
+          <input type="checkbox" checked={useAIExtract} onChange={e => setUseAIExtract(e.target.checked)} className="w-4 h-4 rounded" />
+          <span className="text-muted-foreground">AI Extract</span>
         </label>
 
         <Button
