@@ -28,7 +28,7 @@ jobs:
 
       - name: Package and deploy presign handler
         run: |
-          zip -j presign.zip backend/presign_handler.py backend/docx_writer.py backend/docx_node_ids.py
+          zip -j presign.zip backend/presign_handler.py backend/docx_writer.py backend/docx_node_ids.py backend/docx_ast.py backend/field_extractor.py
           aws lambda update-function-code \
             --function-name paperless-presign \
             --zip-file fileb://presign.zip \
