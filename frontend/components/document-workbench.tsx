@@ -188,12 +188,14 @@ export default function DocumentWorkbench() {
   const [mode, setMode] = useState<'html' | 'fields'>('html');
   const [exportBusy, setExportBusy] = useState(false);
   const [exportDownloadUrl, setExportDownloadUrl] = useState<string | null>(null);
+  const [runHtml, setRunHtml] = useState(true);
+  const [runFields, setRunFields] = useState(true);
   const skipRestoreRef = useRef(false);
   const statusRef = useRef(status);
   const editorRef = useRef<HtmlEditorHandle>(null);
   useEffect(() => { statusRef.current = status; }, [status]);
 
-  async function runExtract(key: string) {
+  async function runExtract(key: string, force = false) {
     setExtractStatus('extracting');
     setFields([]);
     setExportDownloadUrl(null);
@@ -201,7 +203,7 @@ export default function DocumentWorkbench() {
       const resp = await fetch(`${PRESIGN_URL}?action=extract`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key, useAI }),
+        body: JSON.stringify({ key, useAI, force }),
       });
       if (!resp.ok) throw new Error(`Extract failed (${resp.status})`);
       const data = await resp.json() as { fields?: ExtractedField[] };
@@ -319,9 +321,32 @@ export default function DocumentWorkbench() {
     return r.json() as Promise<{ status: string; resultUrl: string; originalUrl?: string; key: string }>;
   }
 
+  /* shared html-conversion helper: invoke renderer + poll */
+  async function pollHtml(key: string): Promise<{ html: string; originalUrl: string | null }> {
+    const convResp = await fetch(`${PRESIGN_URL}?action=convert`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key, useAI }),
+    });
+    if (!convResp.ok) console.warn('Failed to invoke renderer, will rely on S3 events');
+    for (let i = 0; i < 60; i++) {
+      const result = await pollResult(key);
+      if (result?.status === 'ready' && result.resultUrl) {
+        const html = await fetch(result.resultUrl).then(r => r.text());
+        return { html, originalUrl: result.originalUrl ?? null };
+      }
+      await new Promise(r => setTimeout(r, 2000));
+    }
+    throw new Error('Timed out waiting for conversion.');
+  }
+
   /* convert */
   async function handleConvert() {
     if (!sourceFile) return;
+    if (!runHtml && !runFields) {
+      setNotification({ type: 'error', message: 'Enable at least one pipeline.' });
+      return;
+    }
     setNotification(null);
     setStatus('converting');
     try {
@@ -335,39 +360,56 @@ export default function DocumentWorkbench() {
       });
       if (!up.ok) throw new Error(`Upload failed (${up.status})`);
 
-      void runExtract(key);
+      const title = stripExtension(sourceFile.name);
+      setDocTitle(title);
+      setOriginalKey(key);
 
-      if (useAI) {
-        const convResp = await fetch(PRESIGN_URL, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'convert', key, useAI: true }),
-        });
-        if (!convResp.ok) console.warn('Failed to invoke AI conversion, will rely on S3 events');
+      if (runFields) void runExtract(key);
+
+      if (!runHtml) {
+        setStatus('idle');
+        void fetchLibrary().catch(console.error);
+        return;
       }
 
-      for (let i = 0; i < 60; i++) {
-        const result = await pollResult(key);
-        if (result?.status === 'ready' && result.resultUrl) {
-          const html = await fetch(result.resultUrl).then(r => r.text());
-          const title = stripExtension(sourceFile.name);
-          skipRestoreRef.current = true;
-          setDocTitle(title); setHtmlDraft(html);
-          setDocxSource(result.originalUrl ?? null); setOriginalKey(key); setShowCompare(false);
-          setStatus('ready');
-          setNotification({ type: 'success', message: 'Conversion complete.' });
-          setSavedAt(null);
-          localStorage.setItem(`pb:draft:${title}`, html);
-          void fetchLibrary().catch(console.error);
-          return;
-        }
-        await new Promise(r => setTimeout(r, 2000));
-      }
-      throw new Error('Timed out waiting for conversion.');
+      const { html, originalUrl } = await pollHtml(key);
+      skipRestoreRef.current = true;
+      setHtmlDraft(html);
+      setDocxSource(originalUrl); setShowCompare(false);
+      setStatus('ready');
+      setNotification({ type: 'success', message: 'Conversion complete.' });
+      setSavedAt(null);
+      localStorage.setItem(`pb:draft:${title}`, html);
+      void fetchLibrary().catch(console.error);
     } catch (e) {
       setStatus('idle');
       setNotification({ type: 'error', message: e instanceof Error ? e.message : String(e) });
     }
+  }
+
+  async function retryConvert() {
+    if (!originalKey) return;
+    setStatus('converting');
+    setNotification(null);
+    try {
+      const { html, originalUrl } = await pollHtml(originalKey);
+      skipRestoreRef.current = true;
+      setHtmlDraft(html);
+      setDocxSource(originalUrl); setShowCompare(false);
+      setStatus('ready');
+      setNotification({ type: 'success', message: 'Conversion complete.' });
+      setSavedAt(null);
+      if (docTitle) localStorage.setItem(`pb:draft:${docTitle}`, html);
+      void fetchLibrary().catch(console.error);
+    } catch (e) {
+      setStatus('idle');
+      setNotification({ type: 'error', message: e instanceof Error ? e.message : String(e) });
+    }
+  }
+
+  async function retryExtract() {
+    if (!originalKey) return;
+    await runExtract(originalKey, true);
   }
 
   /* load from library */
@@ -491,6 +533,24 @@ export default function DocumentWorkbench() {
         <div className="ml-auto flex items-center gap-2">
           {convertingBadge}
           {extractBadge}
+          {originalKey && status !== 'converting' && runHtml && (
+            <button
+              onClick={() => void retryConvert()}
+              title="Retry HTML conversion"
+              className="h-6 w-6 flex items-center justify-center rounded text-muted-foreground hover:text-sky-600 hover:bg-sky-50 transition-colors"
+            >
+              <RefreshCw className="h-3 w-3" />
+            </button>
+          )}
+          {originalKey && extractStatus !== 'extracting' && runFields && (
+            <button
+              onClick={() => void retryExtract()}
+              title="Retry field extraction"
+              className="h-6 w-6 flex items-center justify-center rounded text-muted-foreground hover:text-purple-600 hover:bg-purple-50 transition-colors"
+            >
+              <RefreshCw className="h-3 w-3" />
+            </button>
+          )}
           {savedAt && <span className="text-xs text-muted-foreground hidden sm:block">Saved {savedAt}</span>}
           <Button variant="outline" size="sm" className="border-sky-200 text-sky-700 hover:bg-sky-50 h-7 text-xs" onClick={() => void handleSave()} disabled={!isReady}>
             <Save className="h-3 w-3" />
@@ -540,13 +600,18 @@ export default function DocumentWorkbench() {
         <input id="docx-upload" type="file" accept=".docx" className="sr-only" onChange={handleFileChange} />
 
         <label className="inline-flex items-center gap-2 h-8 px-3 rounded-md border border-input bg-background text-sm cursor-pointer hover:bg-accent transition-colors">
-          <input
-            type="checkbox"
-            checked={useAI}
-            onChange={(e) => setUseAI(e.target.checked)}
-            className="w-4 h-4 rounded"
-          />
-          <span className="text-muted-foreground">AI Annotations</span>
+          <input type="checkbox" checked={runHtml} onChange={e => setRunHtml(e.target.checked)} className="w-4 h-4 rounded" />
+          <span className="text-muted-foreground">HTML</span>
+        </label>
+
+        <label className="inline-flex items-center gap-2 h-8 px-3 rounded-md border border-input bg-background text-sm cursor-pointer hover:bg-accent transition-colors">
+          <input type="checkbox" checked={runFields} onChange={e => setRunFields(e.target.checked)} className="w-4 h-4 rounded" />
+          <span className="text-muted-foreground">Fields</span>
+        </label>
+
+        <label className="inline-flex items-center gap-2 h-8 px-3 rounded-md border border-input bg-background text-sm cursor-pointer hover:bg-accent transition-colors">
+          <input type="checkbox" checked={useAI} onChange={e => setUseAI(e.target.checked)} className="w-4 h-4 rounded" />
+          <span className="text-muted-foreground">AI</span>
         </label>
 
         <Button

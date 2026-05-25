@@ -7,6 +7,17 @@ on:
       - 'backend/**'
       - 'Dockerfile.lambda'
   workflow_dispatch:
+    inputs:
+      deploy_presign:
+        description: Deploy the presign Lambda
+        type: boolean
+        required: false
+        default: true
+      deploy_renderer:
+        description: Deploy the renderer Lambda
+        type: boolean
+        required: false
+        default: true
 
 env:
   AWS_REGION: eu-west-1
@@ -17,6 +28,7 @@ jobs:
   deploy-presign:
     name: Deploy presign Lambda
     runs-on: ubuntu-latest
+    if: github.event_name != 'workflow_dispatch' || inputs.deploy_presign
     steps:
       - uses: actions/checkout@v4
 
@@ -26,6 +38,11 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up Python 3.11 for packaging
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
       - name: Package and deploy presign handler
         run: |
@@ -45,6 +62,7 @@ jobs:
   deploy-renderer:
     name: Deploy renderer Lambda
     runs-on: ubuntu-latest
+    if: github.event_name != 'workflow_dispatch' || inputs.deploy_renderer
     steps:
       - uses: actions/checkout@v4
 
