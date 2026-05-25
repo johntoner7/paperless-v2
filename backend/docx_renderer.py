@@ -63,7 +63,16 @@ def render_ast_to_html(ast: dict, annotations: Optional[dict] = None) -> str:
         content = _render_blocks(group, ann_map)
         hdr = f'<div class="docx-page-header">{header_html}</div>' if header_html else ""
         ftr = f'<div class="docx-page-footer">{footer_html}</div>' if footer_html else ""
-        page_divs.append(f'<div class="docx-page">{hdr}<div class="docx-page-content">{content}</div>{ftr}</div>')
+        # When no header/footer, the top/bottom page margins must be applied directly
+        # to the content div — otherwise that padding never appears in the layout.
+        margins = page_setup.get("margins_in") or {}
+        dpi = 96
+        extra_pt = round((margins.get("top") or 0.5) * dpi) if not header_html else 0
+        extra_pb = round((margins.get("bottom") or 0.5) * dpi) if not footer_html else 0
+        margin_style = ""
+        if extra_pt or extra_pb:
+            margin_style = f' style="padding-top:{extra_pt}px;padding-bottom:{extra_pb}px"'
+        page_divs.append(f'<div class="docx-page">{hdr}<div class="docx-page-content"{margin_style}>{content}</div>{ftr}</div>')
         block_offset += len(group)
 
     body = "\n".join(page_divs)
@@ -156,6 +165,21 @@ def _build_page_css(page_setup: dict) -> str:
     block_sel = ", ".join(f"{z} {t}" for z in zones for t in block_tags)
     list_sel  = ", ".join(f"{z} {t}" for z in zones for t in list_tags)
 
+    # Most Word table styles (TableGrid, Normal Table) set after=0 and line=240.
+    # line=240 → single spacing → CSS line-height = 1.0 × win_ratio.
+    win_ratio = page_setup.get("default_win_ratio") or 1.3
+    tbl_lh = round(win_ratio, 4)
+
+    # Zone-specific table selectors (specificity 0,1,2) beat zone p rules (0,1,1) without
+    # needing !important, so per-paragraph inline line-height overrides still win.
+    tbl_para_sel = ", ".join(
+        f"{z} td p, {z} th p" for z in zones
+    )
+    tbl_li_sel  = ", ".join(f"{z} td li, {z} th li" for z in zones)
+    tbl_lst_sel = ", ".join(
+        f"{z} td ul, {z} td ol, {z} th ul, {z} th ol" for z in zones
+    )
+
     return (
         f".document{{background:#e0e0e0;padding:24px;display:flex;flex-direction:column;align-items:center;gap:24px}}"
         f".docx-page{{width:{w_px}px;height:{h_px}px;background:white;box-shadow:0 2px 8px rgba(0,0,0,.25);box-sizing:border-box;display:flex;flex-direction:column;overflow:hidden}}"
@@ -166,14 +190,12 @@ def _build_page_css(page_setup: dict) -> str:
         f"{block_sel}{{margin-top:{para_mt}px;margin-bottom:{para_mb}px}}"
         # Reset list indentation/margins to browser-neutral values
         f"{list_sel}{{margin-top:{para_mt}px;margin-bottom:{para_mb}px;padding-left:2em}}"
-        # Suppress paragraph spacing inside cells — Word's Normal Table style does this.
-        # Use !important to beat the zone-level `.docx-page-content p` rule (specificity 0,1,1).
-        "td p,th p{margin-top:0!important;margin-bottom:0!important}"
-        # Restore default after-spacing for empty spacer paragraphs inside cells so they
-        # contribute vertical space the same way Word's paragraph spacing does.
-        f"td .docx-empty-paragraph,th .docx-empty-paragraph{{margin-bottom:{para_mb}px!important}}"
-        "td li,th li{margin-top:0!important;margin-bottom:0!important}"
-        "td ul,td ol,th ul,th ol{margin-top:0!important;margin-bottom:0!important}"
+        # Table cells: Word's Normal Table/TableGrid sets after=0 and line=240 (single spacing).
+        # Higher-specificity selectors (zone + td p) beat the zone p rule without !important
+        # so per-paragraph inline line-height values can still override.
+        f"{tbl_para_sel}{{margin-top:0;margin-bottom:0;line-height:{tbl_lh}}}"
+        f"{tbl_li_sel}{{margin-top:0;margin-bottom:0}}"
+        f"{tbl_lst_sel}{{margin-top:0;margin-bottom:0}}"
     )
 
 

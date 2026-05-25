@@ -61,6 +61,13 @@ def converted_html_key(source_key):
     return f'converted/{base_no_ext}.html'
 
 
+def extracted_fields_key(source_key):
+    base_no_ext = os.path.splitext(source_key)[0]
+    if base_no_ext.startswith('uploads/'):
+        return base_no_ext.replace('uploads/', 'extracted/', 1) + '.json'
+    return f'extracted/{base_no_ext}.json'
+
+
 def object_exists(bucket, key):
     try:
         s3.head_object(Bucket=bucket, Key=key)
@@ -192,6 +199,47 @@ def lambda_handler(event, context):
                 ExpiresIn=URL_EXPIRATION,
             )
             return make_response(200, {'url': download_url, 'key': out_key})
+
+        if method == 'POST' and action == 'extract':
+            # Body: {"key":"uploads/uuid/file.docx","useAI":true,"force":false}
+            payload, error = parse_json_body(event)
+            if error:
+                return make_response(400, {'error': error})
+            key = payload.get('key')
+            use_ai = payload.get('useAI', True)
+            force = payload.get('force', False)
+
+            if not key:
+                return make_response(400, {'error': 'key is required'})
+
+            cache_key = extracted_fields_key(key)
+            if not force and object_exists(BUCKET, cache_key):
+                obj = s3.get_object(Bucket=BUCKET, Key=cache_key)
+                cached = json.loads(obj['Body'].read().decode('utf-8'))
+                return make_response(200, {'cached': True, 'key': cache_key, 'fields': cached.get('fields', [])})
+
+            import tempfile, sys, os
+            sys.path.insert(0, '/var/task')
+            from docx_ast import build_docx_ast
+            from field_extractor import extract_fields_from_ast, extract_fields_from_ast_with_ai
+
+            with tempfile.TemporaryDirectory() as tmp:
+                src = os.path.join(tmp, 'original.docx')
+                s3.download_file(BUCKET, key, src)
+                ast = build_docx_ast(src)
+
+            if use_ai:
+                extracted = extract_fields_from_ast_with_ai(ast)
+            else:
+                extracted = extract_fields_from_ast(ast)
+
+            s3.put_object(
+                Bucket=BUCKET,
+                Key=cache_key,
+                Body=json.dumps(extracted).encode('utf-8'),
+                ContentType='application/json',
+            )
+            return make_response(200, {'cached': False, 'key': cache_key, 'fields': extracted.get('fields', [])})
 
         if method == 'POST':
             # expect JSON body with fileName and optional contentType

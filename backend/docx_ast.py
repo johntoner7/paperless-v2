@@ -83,6 +83,20 @@ def build_docx_ast(docx_path: str | Path) -> dict:
             except KeyError:
                 numbering = {}
 
+            # Resolve theme body font (minorHAnsi) so the renderer can apply
+            # accurate font-metrics correction to CSS line-height.
+            default_body_font: str = ""
+            try:
+                theme_xml = _read_xml(archive, "word/theme/theme1.xml")
+                _THEME_NS = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+                minor_latin = theme_xml.find(
+                    f".//{_THEME_NS}minorFont/{_THEME_NS}latin"
+                )
+                if minor_latin is not None:
+                    default_body_font = minor_latin.get("typeface", "")
+            except (KeyError, Exception):
+                pass
+
             id_counters = {"p": 0, "r": 0, "sdt": 0}
             inject_docx_node_ids(document_xml, id_counters)
 
@@ -143,7 +157,7 @@ def build_docx_ast(docx_path: str | Path) -> dict:
         for path_key, img_bytes in media.items()
     }
 
-    page_setup = _extract_page_setup(body_elem, styles_root)
+    page_setup = _extract_page_setup(body_elem, styles_root, default_body_font)
 
     result = {
         "version": "1.0",
@@ -833,7 +847,31 @@ def _extract_cell_style(cell: ET.Element) -> dict:
 # Page setup extraction
 # ---------------------------------------------------------------------------
 
-def _extract_page_setup(body: ET.Element, styles_root: ET.Element | None = None) -> dict:
+# Win-metrics ratio (winAscent+winDescent)/UPM for common fonts.
+# Word's lineRule="auto" uses win metrics as the line pitch base; CSS uses em (font-size).
+# The ratio corrects CSS line-height to match Word's rendered line height.
+_FONT_WIN_RATIO: dict[str, float] = {
+    "calibri":        1.328,  # (2206+514)/2048
+    "calibri light":  1.328,
+    "aptos":          1.328,  # successor to Calibri, same design metrics
+    "aptos display":  1.328,
+    "aptos narrow":   1.328,
+    "arial":          1.275,  # (2112+497)/2048
+    "arial narrow":   1.275,
+    "times new roman":1.275,
+    "segoe ui":       1.329,  # (2210+514)/2048
+    "cambria":        1.328,
+    "georgia":        1.300,
+    "verdana":        1.261,
+}
+_FONT_WIN_RATIO_DEFAULT = 1.3  # safe fallback for unknown fonts
+
+
+def _extract_page_setup(
+    body: ET.Element,
+    styles_root: ET.Element | None = None,
+    default_body_font: str = "",
+) -> dict:
     """Extract page dimensions, margins, and default typography from the document."""
     sect = body.find(f"{W_NS}sectPr")
     result: dict = {}
@@ -885,7 +923,12 @@ def _extract_page_setup(body: ET.Element, styles_root: ET.Element | None = None)
                 before = spacing.get(f"{W_NS}before")
                 if line and line_rule == "auto":
                     try:
-                        result["default_line_height"] = round(int(line) / 240, 4)
+                        lh_multiplier = int(line) / 240
+                        win_ratio = _FONT_WIN_RATIO.get(
+                            default_body_font.lower(), _FONT_WIN_RATIO_DEFAULT
+                        )
+                        result["default_line_height"] = round(lh_multiplier * win_ratio, 4)
+                        result["default_win_ratio"] = round(win_ratio, 4)
                     except ValueError:
                         pass
                 if after is not None:
@@ -910,7 +953,12 @@ def _extract_page_setup(body: ET.Element, styles_root: ET.Element | None = None)
                         line_rule = spacing.get(f"{W_NS}lineRule")
                         if line and line_rule in ("auto", None):
                             try:
-                                result["default_line_height"] = round(int(line) / 240, 4)
+                                lh_multiplier = int(line) / 240
+                                win_ratio = _FONT_WIN_RATIO.get(
+                                    default_body_font.lower(), _FONT_WIN_RATIO_DEFAULT
+                                )
+                                result["default_line_height"] = round(lh_multiplier * win_ratio, 4)
+                                result["default_win_ratio"] = round(win_ratio, 4)
                             except ValueError:
                                 pass
                     break
