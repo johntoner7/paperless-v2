@@ -1,6 +1,8 @@
 import os
 import json
 import uuid
+import sys
+import importlib
 import boto3
 from urllib.parse import parse_qs
 from botocore.exceptions import ClientError
@@ -52,6 +54,41 @@ def parse_json_body(event):
         return json.loads(body), None
     except json.JSONDecodeError:
         return None, 'invalid JSON body'
+
+
+def _ensure_backend_import_paths():
+    candidates = [
+        '/var/task',
+        '/var/task/backend',
+        os.path.dirname(__file__),
+        os.path.dirname(os.path.dirname(__file__)),
+    ]
+    for path in candidates:
+        if path and os.path.isdir(path) and path not in sys.path:
+            sys.path.insert(0, path)
+
+
+def _import_backend_module(module_name):
+    _ensure_backend_import_paths()
+    package = __package__ or ''
+    candidates = []
+    if package:
+        candidates.append(f'{package}.{module_name}')
+    candidates.extend([module_name, f'backend.{module_name}'])
+
+    seen = set()
+    last_error = None
+    for name in candidates:
+        if name in seen:
+            continue
+        seen.add(name)
+        try:
+            return importlib.import_module(name)
+        except ModuleNotFoundError as exc:
+            last_error = exc
+    if last_error is not None:
+        raise last_error
+    raise ModuleNotFoundError(f'Unable to import backend module: {module_name}')
 
 
 def converted_html_key(source_key):
@@ -171,9 +208,8 @@ def lambda_handler(event, context):
             if not original_key:
                 return make_response(400, {'error': 'originalKey is required'})
 
-            import tempfile, sys, os
-            sys.path.insert(0, '/var/task')
-            from docx_writer import apply_patches
+            import tempfile, os
+            apply_patches = _import_backend_module('docx_writer').apply_patches
 
             with tempfile.TemporaryDirectory() as tmp:
                 src = os.path.join(tmp, 'original.docx')
@@ -218,10 +254,11 @@ def lambda_handler(event, context):
                 cached = json.loads(obj['Body'].read().decode('utf-8'))
                 return make_response(200, {'cached': True, 'key': cache_key, 'fields': cached.get('fields', [])})
 
-            import tempfile, sys, os
-            sys.path.insert(0, '/var/task')
-            from docx_ast import build_docx_ast
-            from field_extractor import extract_fields_from_ast, extract_fields_from_ast_with_ai
+            import tempfile, os
+            build_docx_ast = _import_backend_module('docx_ast').build_docx_ast
+            field_extractor = _import_backend_module('field_extractor')
+            extract_fields_from_ast = field_extractor.extract_fields_from_ast
+            extract_fields_from_ast_with_ai = field_extractor.extract_fields_from_ast_with_ai
 
             with tempfile.TemporaryDirectory() as tmp:
                 src = os.path.join(tmp, 'original.docx')

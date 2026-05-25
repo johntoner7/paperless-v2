@@ -3,7 +3,10 @@ import io
 import zipfile
 import xml.etree.ElementTree as ET
 
-from docx_node_ids import NODE_ID_ATTR, inject_docx_node_ids
+try:
+    from .docx_node_ids import NODE_ID_ATTR, inject_docx_node_ids
+except ImportError:
+    from docx_node_ids import NODE_ID_ATTR, inject_docx_node_ids
 
 W_NS   = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
 W14_NS = '{http://schemas.microsoft.com/office/word/2010/wordml}'

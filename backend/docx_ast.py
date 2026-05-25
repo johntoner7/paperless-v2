@@ -14,7 +14,10 @@ from pathlib import Path
 from typing import Dict, List, Optional
 from xml.etree import ElementTree as ET
 
-from docx_node_ids import NODE_ID_ATTR, inject_docx_node_ids
+try:
+    from .docx_node_ids import NODE_ID_ATTR, inject_docx_node_ids
+except ImportError:
+    from docx_node_ids import NODE_ID_ATTR, inject_docx_node_ids
 
 W_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 R_NS = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"

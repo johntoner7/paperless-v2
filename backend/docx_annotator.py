@@ -315,7 +315,10 @@ def _empty() -> dict:
 
 if __name__ == "__main__":
     import sys
-    from docx_ast import build_docx_ast
+    try:
+        from .docx_ast import build_docx_ast
+    except ImportError:
+        from docx_ast import build_docx_ast
 
     if len(sys.argv) < 2:
         print("Usage: python docx_annotator.py input.docx [out.json]", file=sys.stderr)

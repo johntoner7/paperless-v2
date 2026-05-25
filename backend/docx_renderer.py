@@ -887,7 +887,10 @@ def _count_html_nodes(html_text: str) -> dict:
 if __name__ == "__main__":
     import json
     import sys
-    from docx_ast import build_docx_ast
+    try:
+        from .docx_ast import build_docx_ast
+    except ImportError:
+        from docx_ast import build_docx_ast
 
     use_ai = "--use-ai" in sys.argv
     if use_ai:
@@ -908,7 +911,10 @@ if __name__ == "__main__":
     # If --use-ai flag is set, generate annotations using Claude
     if use_ai:
         try:
-            from docx_annotator import generate_annotations
+            try:
+                from .docx_annotator import generate_annotations
+            except ImportError:
+                from docx_annotator import generate_annotations
             annotations = generate_annotations(ast)
             print(f"[docx_renderer] AI annotations generated", file=sys.stderr)
         except Exception as exc:
