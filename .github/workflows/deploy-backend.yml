@@ -6,6 +6,7 @@ on:
     paths:
       - 'backend/**'
       - 'Dockerfile.lambda'
+  workflow_dispatch:
 
 env:
   AWS_REGION: eu-west-1
