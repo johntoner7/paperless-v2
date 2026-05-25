@@ -8,6 +8,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
+import { AlertBanner } from '@/components/ui/alert-banner';
 import { cn } from '@/lib/utils';
 
 type ConversionState = 'idle' | 'converting' | 'ready' | 'error';
@@ -109,7 +110,6 @@ export default function DocumentWorkbench() {
   const PRESIGN_URL = process.env.NEXT_PUBLIC_PRESIGN_URL ?? '';
 
   const [status, setStatus] = useState<ConversionState>('idle');
-  const [message, setMessage] = useState('');
   const [sourceFile, setSourceFile] = useState<File | null>(null);
   const [docTitle, setDocTitle] = useState('');
   const [htmlDraft, setHtmlDraft] = useState('');
@@ -121,7 +121,15 @@ export default function DocumentWorkbench() {
   const [showCompare, setShowCompare] = useState(false);
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [useAI, setUseAI] = useState(false);
+  const [notification, setNotification] = useState<{ type: 'error' | 'success'; message: string } | null>(null);
   const skipRestoreRef = useRef(false);
+
+  async function responseError(resp: Response, fallback: string): Promise<string> {
+    try {
+      const body = await resp.json() as { error?: string };
+      return body.error ?? fallback;
+    } catch { return fallback; }
+  }
 
   const draftKey = useMemo(() => `pb:draft:${docTitle}`, [docTitle]);
 
@@ -130,7 +138,7 @@ export default function DocumentWorkbench() {
     if (skipRestoreRef.current) { skipRestoreRef.current = false; return; }
     if (!docTitle) return;
     const saved = localStorage.getItem(draftKey);
-    if (saved) { setHtmlDraft(saved); setStatus('ready'); setMessage('Draft restored.'); }
+    if (saved) { setHtmlDraft(saved); setStatus('ready'); setNotification({ type: 'success', message: 'Draft restored.' }); }
   }, [draftKey, docTitle]);
 
   /* library */
@@ -150,7 +158,7 @@ export default function DocumentWorkbench() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ fileName, contentType }),
     });
-    if (!r.ok) throw new Error(`Presign failed: ${r.status}`);
+    if (!r.ok) throw new Error(await responseError(r, `Upload authorisation failed (${r.status})`));
     return r.json() as Promise<{ uploadUrl: string; key: string }>;
   }
 
@@ -164,7 +172,8 @@ export default function DocumentWorkbench() {
   /* convert */
   async function handleConvert() {
     if (!sourceFile) return;
-    setStatus('converting'); setMessage('Uploading…');
+    setNotification(null);
+    setStatus('converting');
     try {
       const { uploadUrl, key } = await presign(
         sourceFile.name,
@@ -174,21 +183,17 @@ export default function DocumentWorkbench() {
         method: 'PUT', body: sourceFile,
         headers: { 'Content-Type': sourceFile.type || 'application/octet-stream' },
       });
-      if (!up.ok) throw new Error(`Upload failed: ${up.status}`);
-      
-      // Invoke conversion with AI flag if enabled
-      setMessage('Converting…');
+      if (!up.ok) throw new Error(`Upload failed (${up.status})`);
+
       if (useAI) {
         const convResp = await fetch(PRESIGN_URL, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ action: 'convert', key, useAI: true }),
         });
-        if (!convResp.ok) {
-          console.warn('Failed to invoke AI conversion, will rely on S3 events');
-        }
+        if (!convResp.ok) console.warn('Failed to invoke AI conversion, will rely on S3 events');
       }
-      
+
       for (let i = 0; i < 60; i++) {
         const result = await pollResult(key);
         if (result?.status === 'ready' && result.resultUrl) {
@@ -197,7 +202,8 @@ export default function DocumentWorkbench() {
           skipRestoreRef.current = true;
           setDocTitle(title); setHtmlDraft(html);
           setDocxSource(result.originalUrl ?? null); setOriginalKey(key); setShowCompare(false);
-          setStatus('ready'); setMessage('Conversion complete.');
+          setStatus('ready');
+          setNotification({ type: 'success', message: 'Conversion complete.' });
           setSavedAt(null);
           localStorage.setItem(`pb:draft:${title}`, html);
           void fetchLibrary().catch(console.error);
@@ -207,7 +213,8 @@ export default function DocumentWorkbench() {
       }
       throw new Error('Timed out waiting for conversion.');
     } catch (e) {
-      setStatus('error'); setMessage(e instanceof Error ? e.message : String(e));
+      setStatus('idle');
+      setNotification({ type: 'error', message: e instanceof Error ? e.message : String(e) });
     }
   }
 
@@ -215,22 +222,30 @@ export default function DocumentWorkbench() {
   async function loadDoc(key: string) {
     const entry = library.find(i => i.key === key);
     if (!entry || entry.status !== 'ready') {
-      setMessage(`${entry?.fileName ?? key} is still processing.`); return;
+      setNotification({ type: 'error', message: `${entry?.fileName ?? key} is still processing.` });
+      return;
     }
-    setStatus('converting'); setMessage(`Loading ${entry.fileName}…`);
+    setNotification(null);
+    setStatus('converting');
     try {
       const result = await pollResult(key);
-      if (!result?.resultUrl) { setStatus('idle'); setMessage('No HTML yet.'); return; }
+      if (!result?.resultUrl) {
+        setStatus('idle');
+        setNotification({ type: 'error', message: 'No converted HTML found — try re-uploading.' });
+        return;
+      }
       const html = await fetch(result.resultUrl).then(r => r.text());
       const title = stripExtension(entry.fileName);
       skipRestoreRef.current = true;
       setDocTitle(title); setSourceFile(null); setHtmlDraft(html);
       setDocxSource(result.originalUrl ?? null); setOriginalKey(key); setShowCompare(false);
-      setSelectedKey(key); setStatus('ready'); setMessage(`Opened ${entry.fileName}`);
+      setSelectedKey(key); setStatus('ready');
+      setNotification({ type: 'success', message: `Opened ${entry.fileName}` });
       setSavedAt(null);
       localStorage.setItem(`pb:draft:${title}`, html);
     } catch (e) {
-      setStatus('error'); setMessage(e instanceof Error ? e.message : String(e));
+      setStatus('idle');
+      setNotification({ type: 'error', message: e instanceof Error ? e.message : String(e) });
     }
   }
 
@@ -238,9 +253,10 @@ export default function DocumentWorkbench() {
     const f = e.target.files?.[0];
     if (!f) return;
     if (!f.name.toLowerCase().endsWith('.docx')) {
-      setStatus('error'); setMessage('Only .docx files are supported.'); return;
+      setNotification({ type: 'error', message: 'Only .docx files are supported.' });
+      return;
     }
-    setSourceFile(f); setStatus('idle'); setMessage('');
+    setSourceFile(f); setStatus('idle'); setNotification(null);
   }
 
   async function handleSave() {
@@ -248,12 +264,13 @@ export default function DocumentWorkbench() {
     const ts = new Date().toISOString().replace(/[:.]/g, '-');
     downloadBlob(`${docTitle || 'document'}-${ts}.html`, htmlDraft, 'text/html;charset=utf-8');
     localStorage.setItem(draftKey, htmlDraft);
-    setSavedAt(new Date().toLocaleTimeString()); setMessage('Saved.');
+    setSavedAt(new Date().toLocaleTimeString());
+    setNotification({ type: 'success', message: 'HTML saved.' });
   }
 
   async function handlePdf() {
     if (status !== 'ready') return;
-    setMessage('Generating PDF…');
+    setNotification(null);
     try {
       const h2p = (await import('html2pdf.js')).default;
       const el = Object.assign(document.createElement('div'), { innerHTML: htmlDraft });
@@ -263,17 +280,16 @@ export default function DocumentWorkbench() {
         html2canvas: { scale: 2, useCORS: true },
         jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
       }).from(el).save();
-      setMessage('PDF downloaded.');
+      setNotification({ type: 'success', message: 'PDF downloaded.' });
     } catch (e) {
-      setStatus('error'); setMessage(e instanceof Error ? e.message : 'PDF failed.');
+      setNotification({ type: 'error', message: e instanceof Error ? e.message : 'PDF generation failed.' });
     }
   }
 
   async function handleExportDocx() {
     if (!originalKey || status !== 'ready') return;
-    setMessage('Exporting DOCX…');
+    setNotification(null);
     try {
-      // Parse current HTML and extract stable node-identified run elements.
       const parser = new DOMParser();
       const doc = parser.parseFromString(htmlDraft, 'text/html');
       const patches: Array<Record<string, unknown>> = [];
@@ -281,12 +297,10 @@ export default function DocumentWorkbench() {
       doc.querySelectorAll('[data-node-kind="run"][data-node-id]').forEach(el => {
         const nodeId = el.getAttribute('data-node-id');
         if (!nodeId) return;
-
         const patch: Record<string, unknown> = {
           node_id: nodeId,
           operation: el.querySelector('[data-type="checkbox"]') ? 'toggle_checkbox' : 'replace_text',
         };
-
         if (patch.operation === 'toggle_checkbox') {
           patch.checked = el.textContent?.includes('☒') ?? false;
         } else {
@@ -300,10 +314,9 @@ export default function DocumentWorkbench() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ originalKey, patches }),
       });
-      if (!resp.ok) throw new Error(`Export failed: ${resp.status}`);
+      if (!resp.ok) throw new Error(await responseError(resp, `Export failed (${resp.status})`));
       const { url } = await resp.json() as { url: string };
 
-      // Trigger download
       const a = Object.assign(document.createElement('a'), {
         href: url,
         download: `${docTitle || 'document'}-exported.docx`,
@@ -311,23 +324,18 @@ export default function DocumentWorkbench() {
       document.body.appendChild(a);
       a.click();
       a.remove();
-      setMessage('DOCX exported.');
+      setNotification({ type: 'success', message: 'DOCX exported.' });
     } catch (e) {
-      setStatus('error');
-      setMessage(e instanceof Error ? e.message : 'Export failed.');
+      setNotification({ type: 'error', message: e instanceof Error ? e.message : 'Export failed.' });
     }
   }
 
   const isReady = status === 'ready';
   const canCompare = isReady && docxSource !== null;
 
-  /* ── status badge ── */
-  const statusBadge = {
-    idle: null,
-    converting: <Badge variant="warning" className="animate-pulse">Converting…</Badge>,
-    ready: message ? <span className="text-xs text-muted-foreground">{message}</span> : null,
-    error: <Badge variant="destructive">{message}</Badge>,
-  }[status];
+  const convertingBadge = status === 'converting'
+    ? <Badge variant="warning" className="animate-pulse">Converting…</Badge>
+    : null;
 
   return (
     <div className="flex flex-col flex-1 overflow-hidden bg-background">
@@ -339,7 +347,7 @@ export default function DocumentWorkbench() {
           : <span className="text-sm text-muted-foreground/40 italic">No document open</span>
         }
         <div className="ml-auto flex items-center gap-2">
-          {statusBadge}
+          {convertingBadge}
           {savedAt && <span className="text-xs text-muted-foreground hidden sm:block">Saved {savedAt}</span>}
           <Button variant="outline" size="sm" className="border-sky-200 text-sky-700 hover:bg-sky-50 h-7 text-xs" onClick={() => void handleSave()} disabled={!isReady}>
             <Save className="h-3 w-3" />
@@ -460,6 +468,15 @@ export default function DocumentWorkbench() {
           </>
         )}
       </div>
+
+      {/* ── Notification banner ── */}
+      {notification && (
+        <AlertBanner
+          type={notification.type}
+          message={notification.message}
+          onDismiss={() => setNotification(null)}
+        />
+      )}
 
       {/* ── Workspace ── */}
       <div className="flex flex-1 overflow-hidden gap-0">

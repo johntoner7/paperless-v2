@@ -3,9 +3,13 @@ import json
 import uuid
 import sys
 import importlib
+import logging
 import boto3
 from urllib.parse import parse_qs
 from botocore.exceptions import ClientError
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
 
 _region = os.environ.get('AWS_DEFAULT_REGION', 'eu-west-1')
 s3 = boto3.client('s3', region_name=_region,
@@ -59,9 +63,7 @@ def parse_json_body(event):
 def _ensure_backend_import_paths():
     candidates = [
         '/var/task',
-        '/var/task/backend',
         os.path.dirname(__file__),
-        os.path.dirname(os.path.dirname(__file__)),
     ]
     for path in candidates:
         if path and os.path.isdir(path) and path not in sys.path:
@@ -70,11 +72,10 @@ def _ensure_backend_import_paths():
 
 def _import_backend_module(module_name):
     _ensure_backend_import_paths()
-    package = __package__ or ''
-    candidates = []
+    package = (__package__ or '').rpartition('.')[0]
+    candidates = [module_name]
     if package:
-        candidates.append(f'{package}.{module_name}')
-    candidates.extend([module_name, f'backend.{module_name}'])
+        candidates.insert(0, f'{package}.{module_name}')
 
     seen = set()
     last_error = None
@@ -103,6 +104,15 @@ def extracted_fields_key(source_key):
     if base_no_ext.startswith('uploads/'):
         return base_no_ext.replace('uploads/', 'extracted/', 1) + '.json'
     return f'extracted/{base_no_ext}.json'
+
+
+def _s3_user_message(exc: ClientError, context: str) -> str:
+    code = exc.response.get('Error', {}).get('Code', '')
+    if code in ('404', 'NoSuchKey', 'NotFound'):
+        return f'{context}: file not found — try re-uploading'
+    if code in ('403', 'AccessDenied'):
+        return f'{context}: access denied — check bucket permissions'
+    return f'{context}: storage error ({code})'
 
 
 def object_exists(bucket, key):
@@ -208,33 +218,43 @@ def lambda_handler(event, context):
             if not original_key:
                 return make_response(400, {'error': 'originalKey is required'})
 
-            import tempfile, os
-            apply_patches = _import_backend_module('docx_writer').apply_patches
+            try:
+                import tempfile, os
+                apply_patches = _import_backend_module('docx_writer').apply_patches
 
-            with tempfile.TemporaryDirectory() as tmp:
-                src = os.path.join(tmp, 'original.docx')
-                s3.download_file(BUCKET, original_key, src)
-                with open(src, 'rb') as fh:
-                    docx_bytes = fh.read()
+                with tempfile.TemporaryDirectory() as tmp:
+                    src = os.path.join(tmp, 'original.docx')
+                    try:
+                        s3.download_file(BUCKET, original_key, src)
+                    except ClientError as exc:
+                        return make_response(404 if exc.response['Error']['Code'] in ('404', 'NoSuchKey') else 502,
+                                             {'error': _s3_user_message(exc, 'Download')})
+                    with open(src, 'rb') as fh:
+                        docx_bytes = fh.read()
 
-            out_bytes = apply_patches(docx_bytes, patches)
+                out_bytes = apply_patches(docx_bytes, patches)
 
-            # Upload to exported/uuid/filename-exported.docx
-            base = os.path.splitext(os.path.basename(original_key))[0]
-            key_dir = os.path.dirname(original_key).replace('uploads/', 'exported/', 1)
-            out_key = f"{key_dir}/{base}-exported.docx"
-            s3.put_object(
-                Bucket=BUCKET,
-                Key=out_key,
-                Body=out_bytes,
-                ContentType='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-            )
-            download_url = s3.generate_presigned_url(
-                'get_object',
-                Params={'Bucket': BUCKET, 'Key': out_key},
-                ExpiresIn=URL_EXPIRATION,
-            )
-            return make_response(200, {'url': download_url, 'key': out_key})
+                base = os.path.splitext(os.path.basename(original_key))[0]
+                key_dir = os.path.dirname(original_key).replace('uploads/', 'exported/', 1)
+                out_key = f"{key_dir}/{base}-exported.docx"
+                s3.put_object(
+                    Bucket=BUCKET,
+                    Key=out_key,
+                    Body=out_bytes,
+                    ContentType='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                )
+                download_url = s3.generate_presigned_url(
+                    'get_object',
+                    Params={'Bucket': BUCKET, 'Key': out_key},
+                    ExpiresIn=URL_EXPIRATION,
+                )
+                return make_response(200, {'url': download_url, 'key': out_key})
+            except ModuleNotFoundError as exc:
+                logger.error('export-docx: module import failed: %s', exc)
+                return make_response(500, {'error': 'Server configuration error — deployment may be incomplete'})
+            except Exception as exc:
+                logger.error('export-docx failed: %s', exc, exc_info=True)
+                return make_response(500, {'error': f'Export failed: {exc}'})
 
         if method == 'POST' and action == 'extract':
             # Body: {"key":"uploads/uuid/file.docx","useAI":true,"force":false}
@@ -254,29 +274,44 @@ def lambda_handler(event, context):
                 cached = json.loads(obj['Body'].read().decode('utf-8'))
                 return make_response(200, {'cached': True, 'key': cache_key, 'fields': cached.get('fields', [])})
 
-            import tempfile, os
-            build_docx_ast = _import_backend_module('docx_ast').build_docx_ast
-            field_extractor = _import_backend_module('field_extractor')
-            extract_fields_from_ast = field_extractor.extract_fields_from_ast
-            extract_fields_from_ast_with_ai = field_extractor.extract_fields_from_ast_with_ai
+            try:
+                import tempfile, os
+                build_docx_ast = _import_backend_module('docx_ast').build_docx_ast
+                field_extractor = _import_backend_module('field_extractor')
+                extract_fields_from_ast = field_extractor.extract_fields_from_ast
+                extract_fields_from_ast_with_ai = field_extractor.extract_fields_from_ast_with_ai
 
-            with tempfile.TemporaryDirectory() as tmp:
-                src = os.path.join(tmp, 'original.docx')
-                s3.download_file(BUCKET, key, src)
-                ast = build_docx_ast(src)
+                with tempfile.TemporaryDirectory() as tmp:
+                    src = os.path.join(tmp, 'original.docx')
+                    try:
+                        s3.download_file(BUCKET, key, src)
+                    except ClientError as exc:
+                        return make_response(404 if exc.response['Error']['Code'] in ('404', 'NoSuchKey') else 502,
+                                             {'error': _s3_user_message(exc, 'Download')})
+                    try:
+                        ast = build_docx_ast(src)
+                    except Exception as exc:
+                        logger.error('extract: AST build failed for key=%s: %s', key, exc)
+                        return make_response(422, {'error': f'Could not parse document: {exc}'})
 
-            if use_ai:
-                extracted = extract_fields_from_ast_with_ai(ast)
-            else:
-                extracted = extract_fields_from_ast(ast)
+                if use_ai:
+                    extracted = extract_fields_from_ast_with_ai(ast)
+                else:
+                    extracted = extract_fields_from_ast(ast)
 
-            s3.put_object(
-                Bucket=BUCKET,
-                Key=cache_key,
-                Body=json.dumps(extracted).encode('utf-8'),
-                ContentType='application/json',
-            )
-            return make_response(200, {'cached': False, 'key': cache_key, 'fields': extracted.get('fields', [])})
+                s3.put_object(
+                    Bucket=BUCKET,
+                    Key=cache_key,
+                    Body=json.dumps(extracted).encode('utf-8'),
+                    ContentType='application/json',
+                )
+                return make_response(200, {'cached': False, 'key': cache_key, 'fields': extracted.get('fields', [])})
+            except ModuleNotFoundError as exc:
+                logger.error('extract: module import failed: %s', exc)
+                return make_response(500, {'error': 'Server configuration error — deployment may be incomplete'})
+            except Exception as exc:
+                logger.error('extract failed: %s', exc, exc_info=True)
+                return make_response(500, {'error': f'Extraction failed: {exc}'})
 
         if method == 'POST':
             # expect JSON body with fileName and optional contentType
@@ -330,4 +365,5 @@ def lambda_handler(event, context):
             return make_response(405, {'error': 'method not allowed'})
 
     except Exception as e:
+        logger.error('Unhandled error: %s', e, exc_info=True)
         return make_response(500, {'error': str(e)})

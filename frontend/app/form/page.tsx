@@ -5,6 +5,7 @@ import { Upload, Wand2, FileCheck, Download, AlertCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
+import { AlertBanner } from '@/components/ui/alert-banner';
 import { cn } from '@/lib/utils';
 
 type ExtractedField = {
@@ -16,8 +17,7 @@ type ExtractedField = {
   source?: { nodeIds: string[] };
 };
 
-type ExtractionState = 'idle' | 'uploading' | 'extracting' | 'ready' | 'error';
-type ExportState = 'idle' | 'exporting' | 'done' | 'error';
+type BusyState = 'idle' | 'uploading' | 'extracting' | 'exporting';
 
 type ExtractResponse = {
   cached?: boolean;
@@ -25,20 +25,25 @@ type ExtractResponse = {
   fields?: ExtractedField[];
 };
 
+async function responseError(resp: Response, fallback: string): Promise<string> {
+  try {
+    const body = await resp.json() as { error?: string };
+    return body.error ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 export default function FormExtractionPage() {
   const PRESIGN_URL = process.env.NEXT_PUBLIC_PRESIGN_URL ?? '';
 
-  const [status, setStatus] = useState<ExtractionState>('idle');
-  const [message, setMessage] = useState('');
+  const [busy, setBusy] = useState<BusyState>('idle');
   const [sourceFile, setSourceFile] = useState<File | null>(null);
   const [uploadKey, setUploadKey] = useState<string | null>(null);
   const [fields, setFields] = useState<ExtractedField[]>([]);
-  const [exportStatus, setExportStatus] = useState<ExportState>('idle');
-  const [exportMessage, setExportMessage] = useState('');
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
   const [useAI, setUseAI] = useState(false);
-
-  const isBusy = status === 'uploading' || status === 'extracting';
+  const [notification, setNotification] = useState<{ type: 'error' | 'success'; message: string } | null>(null);
 
   const DATE_RE = /^\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}$|^\d{4}[\/\-.]\d{1,2}[\/\-.]\d{1,2}$/;
 
@@ -67,13 +72,11 @@ export default function FormExtractionPage() {
     const file = e.target.files?.[0] ?? null;
     if (!file) return;
     if (!file.name.toLowerCase().endsWith('.docx')) {
-      setStatus('error');
-      setMessage('Only .docx files are supported.');
+      setNotification({ type: 'error', message: 'Only .docx files are supported.' });
       return;
     }
     setSourceFile(file);
-    setMessage('');
-    setStatus('idle');
+    setNotification(null);
   }
 
   async function presign(fileName: string, contentType: string) {
@@ -82,15 +85,14 @@ export default function FormExtractionPage() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ fileName, contentType }),
     });
-    if (!res.ok) throw new Error(`Presign failed: ${res.status}`);
+    if (!res.ok) throw new Error(await responseError(res, `Upload authorisation failed (${res.status})`));
     return res.json() as Promise<{ uploadUrl: string; key: string }>;
   }
 
   async function handleExtract() {
     if (!sourceFile || !PRESIGN_URL) return;
-    setStatus('uploading');
-    setMessage('Uploading document…');
-
+    setNotification(null);
+    setBusy('uploading');
     try {
       const { uploadUrl, key } = await presign(
         sourceFile.name,
@@ -101,17 +103,16 @@ export default function FormExtractionPage() {
         body: sourceFile,
         headers: { 'Content-Type': sourceFile.type || 'application/octet-stream' },
       });
-      if (!upload.ok) throw new Error(`Upload failed: ${upload.status}`);
+      if (!upload.ok) throw new Error(`Upload failed (${upload.status})`);
       setUploadKey(key);
 
-      setStatus('extracting');
-      setMessage('Extracting fields…');
+      setBusy('extracting');
       const resp = await fetch(`${PRESIGN_URL}?action=extract`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ key, useAI }),
       });
-      if (!resp.ok) throw new Error(`Extract failed: ${resp.status}`);
+      if (!resp.ok) throw new Error(await responseError(resp, `Extraction failed (${resp.status})`));
       const data = (await resp.json()) as ExtractResponse;
       setFields((data.fields ?? []).map((f, idx) => ({
         id: f.id ?? `field_${idx + 1}`,
@@ -121,13 +122,15 @@ export default function FormExtractionPage() {
         confidence: f.confidence ?? 0,
         source: f.source,
       })));
-      setExportStatus('idle');
       setDownloadUrl(null);
-      setStatus('ready');
-      setMessage(data.cached ? 'Loaded cached extraction.' : 'Extraction complete.');
+      setBusy('idle');
+      setNotification({
+        type: 'success',
+        message: data.cached ? 'Loaded cached extraction.' : `Extracted ${(data.fields ?? []).length} fields.`,
+      });
     } catch (e) {
-      setStatus('error');
-      setMessage(e instanceof Error ? e.message : 'Extraction failed.');
+      setBusy('idle');
+      setNotification({ type: 'error', message: e instanceof Error ? e.message : 'Extraction failed.' });
     }
   }
 
@@ -143,17 +146,13 @@ export default function FormExtractionPage() {
       const nodeIds = field.source?.nodeIds ?? [];
       if (field.type === 'checkbox') {
         const sdtId = nodeIds.find((id) => id.startsWith('sdt_'));
-        if (sdtId) {
-          patches.push({ node_id: sdtId, operation: 'toggle_checkbox', checked: Boolean(field.value) });
-        }
+        if (sdtId) patches.push({ node_id: sdtId, operation: 'toggle_checkbox', checked: Boolean(field.value) });
       } else {
         const val = field.value;
         if (val === null || val === '') continue;
         const runIds = nodeIds.filter((id) => id.startsWith('r_'));
         const targetId = runIds[runIds.length - 1];
-        if (targetId) {
-          patches.push({ node_id: targetId, operation: 'replace_text', text: String(val) });
-        }
+        if (targetId) patches.push({ node_id: targetId, operation: 'replace_text', text: String(val) });
       }
     }
     return patches;
@@ -161,8 +160,8 @@ export default function FormExtractionPage() {
 
   async function handleExport() {
     if (!uploadKey || !PRESIGN_URL) return;
-    setExportStatus('exporting');
-    setExportMessage('');
+    setNotification(null);
+    setBusy('exporting');
     try {
       const patches = buildPatches(fields);
       const resp = await fetch(`${PRESIGN_URL}?action=export-docx`, {
@@ -170,22 +169,16 @@ export default function FormExtractionPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ originalKey: uploadKey, patches }),
       });
-      if (!resp.ok) throw new Error(`Export failed: ${resp.status}`);
+      if (!resp.ok) throw new Error(await responseError(resp, `Export failed (${resp.status})`));
       const data = (await resp.json()) as { url: string; key: string };
       setDownloadUrl(data.url);
-      setExportStatus('done');
-      setExportMessage(`${patches.length} patch${patches.length !== 1 ? 'es' : ''} applied.`);
+      setBusy('idle');
+      setNotification({ type: 'success', message: `${patches.length} patch${patches.length !== 1 ? 'es' : ''} applied — ready to download.` });
     } catch (e) {
-      setExportStatus('error');
-      setExportMessage(e instanceof Error ? e.message : 'Export failed.');
+      setBusy('idle');
+      setNotification({ type: 'error', message: e instanceof Error ? e.message : 'Export failed.' });
     }
   }
-
-  const statusBadge = status === 'error'
-    ? <Badge variant="destructive" className="text-xs">{message}</Badge>
-    : status === 'ready' && message
-      ? <span className="text-xs text-muted-foreground">{message}</span>
-      : null;
 
   return (
     <div className="flex flex-col flex-1 overflow-hidden bg-background">
@@ -219,15 +212,13 @@ export default function FormExtractionPage() {
           size="sm"
           className="bg-sky-500 hover:bg-sky-600 text-white border-0"
           onClick={() => void handleExtract()}
-          disabled={!sourceFile || !PRESIGN_URL || isBusy}
+          disabled={!sourceFile || !PRESIGN_URL || busy !== 'idle'}
         >
           <Wand2 className="h-3.5 w-3.5" />
-          {status === 'uploading' ? 'Uploading…' : status === 'extracting' ? 'Extracting…' : 'Extract Fields'}
+          {busy === 'uploading' ? 'Uploading…' : busy === 'extracting' ? 'Extracting…' : 'Extract Fields'}
         </Button>
 
         <Separator orientation="vertical" className="h-5 mx-1 hidden sm:block" />
-
-        {statusBadge}
 
         <div className="ml-auto flex items-center gap-2">
           {fields.length > 0 && (
@@ -243,23 +234,16 @@ export default function FormExtractionPage() {
             </span>
           )}
 
-          {exportStatus === 'error' && (
-            <span className="text-xs text-red-500 hidden sm:inline">{exportMessage}</span>
-          )}
-          {exportStatus === 'done' && !hasErrors && (
-            <span className="text-xs text-muted-foreground hidden sm:inline">{exportMessage}</span>
-          )}
-
           <Button
             variant="outline"
             size="sm"
             className="border-emerald-200 text-emerald-700 hover:bg-emerald-50"
             onClick={() => void handleExport()}
-            disabled={fields.length === 0 || hasErrors || exportStatus === 'exporting'}
+            disabled={fields.length === 0 || hasErrors || busy !== 'idle'}
           >
             <Download className="h-3.5 w-3.5" />
             <span className="hidden sm:inline">
-              {exportStatus === 'exporting' ? 'Exporting…' : 'Export DOCX'}
+              {busy === 'exporting' ? 'Exporting…' : 'Export DOCX'}
             </span>
           </Button>
 
@@ -275,6 +259,15 @@ export default function FormExtractionPage() {
           )}
         </div>
       </div>
+
+      {/* ── Notification banner ── */}
+      {notification && (
+        <AlertBanner
+          type={notification.type}
+          message={notification.message}
+          onDismiss={() => setNotification(null)}
+        />
+      )}
 
       {/* ── Field grid ── */}
       <div className="flex-1 overflow-y-auto p-4 bg-muted/20">
@@ -295,10 +288,7 @@ export default function FormExtractionPage() {
               return (
                 <div
                   key={field.id ?? `${field.label}-${index}`}
-                  className={cn(
-                    'rounded-lg border bg-white p-4',
-                    error ? 'border-red-300' : 'border-border',
-                  )}
+                  className={cn('rounded-lg border bg-white p-4', error ? 'border-red-300' : 'border-border')}
                 >
                   <div className="flex items-start justify-between gap-2 mb-3">
                     <div className="min-w-0">
@@ -307,12 +297,7 @@ export default function FormExtractionPage() {
                     </div>
                     <Badge
                       variant="outline"
-                      className={cn(
-                        'text-xs shrink-0',
-                        isAI
-                          ? 'border-purple-200 bg-purple-50 text-purple-600'
-                          : 'text-muted-foreground',
-                      )}
+                      className={cn('text-xs shrink-0', isAI ? 'border-purple-200 bg-purple-50 text-purple-600' : 'text-muted-foreground')}
                     >
                       {isAI ? 'AI' : 'rule'} · {Math.round((field.confidence ?? 0) * 100)}%
                     </Badge>
