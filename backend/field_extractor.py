@@ -6,8 +6,6 @@ import json
 import re
 from typing import Iterable, Optional
 
-import anthropic
-
 
 _UNDERSCORE_RE = re.compile(r"_{3,}")
 _DATE_HINT_RE = re.compile(r"\bdate\b", re.IGNORECASE)
@@ -73,6 +71,11 @@ def suggest_fields_with_ai(ast: dict, model: str = "claude-sonnet-4-6") -> list[
     )
 
     try:
+        try:
+            import anthropic
+        except ModuleNotFoundError:
+            return []
+
         client = anthropic.Anthropic()
         response = client.messages.create(
             model=model,
