@@ -81,6 +81,27 @@
   color: hsl(240 3.8% 46.1%);
 }
 
+/* ── Editable field hover/focus indicators ── */
+.editor-prose [data-node-kind="run"]:hover,
+.editor-prose [data-node-kind="paragraph"]:hover {
+  background: rgba(59, 130, 246, 0.07);
+  outline: 1px dashed rgba(59, 130, 246, 0.35);
+  outline-offset: 1px;
+  border-radius: 2px;
+}
+
+/* Checkbox spans are click-only — not free-text editable */
+.editor-prose [data-type="checkbox"] {
+  cursor: pointer;
+  user-select: none;
+  padding: 0 2px;
+  border-radius: 2px;
+  transition: background 100ms;
+}
+.editor-prose [data-type="checkbox"]:hover {
+  background: rgba(59, 130, 246, 0.18);
+}
+
 /* ── docx-preview: undo Tailwind preflight inside the wrapper ── */
 .docx-wrapper {
   all: revert;

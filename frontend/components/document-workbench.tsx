@@ -89,6 +89,7 @@ function DocxPane({ url }: { url: string }) {
 
 type HtmlEditorHandle = {
   updateNode: (nodeId: string, text: string) => void;
+  updateCheckbox: (nodeId: string, checked: boolean) => void;
   getHtml: () => string;
 };
 
@@ -113,6 +114,15 @@ const HtmlEditor = forwardRef<HtmlEditorHandle, {
         isSyncingRef.current = true;
         el.textContent = text;
         // Promise microtask queues after the MutationObserver microtask
+        void Promise.resolve().then(() => { isSyncingRef.current = false; });
+      },
+      updateCheckbox(nodeId: string, checked: boolean) {
+        const runEl = divRef.current?.querySelector(`[data-node-id="${nodeId}"]`);
+        if (!runEl) return;
+        const cb = runEl.querySelector('[data-type="checkbox"]') as HTMLElement | null;
+        if (!cb) return;
+        isSyncingRef.current = true;
+        cb.textContent = checked ? '☒' : '☐';
         void Promise.resolve().then(() => { isSyncingRef.current = false; });
       },
       getHtml() {
@@ -163,8 +173,38 @@ const HtmlEditor = forwardRef<HtmlEditorHandle, {
       });
 
       observer.observe(el, { characterData: true, childList: true, subtree: true });
+
+      // Prevent cursor from landing inside checkbox spans (they are click-only)
+      const handleMouseDown = (e: MouseEvent) => {
+        if ((e.target as Element).closest('[data-type="checkbox"]')) {
+          e.preventDefault();
+        }
+      };
+
+      // Toggle ☒ ↔ ☐ on click without letting the MutationObserver re-fire
+      const handleClick = (e: MouseEvent) => {
+        const cb = (e.target as Element).closest('[data-type="checkbox"]') as HTMLElement | null;
+        if (!cb) return;
+        const nowChecked = cb.textContent === '☒';
+        const next = nowChecked ? '☐' : '☒';
+        isSyncingRef.current = true;
+        cb.textContent = next;
+        void Promise.resolve().then(() => { isSyncingRef.current = false; });
+        const runEl = cb.closest('[data-node-kind="run"]');
+        if (runEl) {
+          const nodeId = runEl.getAttribute('data-node-id');
+          if (nodeId) onNodeChangeRef.current?.(nodeId, next);
+        }
+        onChange(el.innerHTML);
+      };
+
+      el.addEventListener('mousedown', handleMouseDown);
+      el.addEventListener('click', handleClick);
+
       return () => {
         observer.disconnect();
+        el.removeEventListener('mousedown', handleMouseDown);
+        el.removeEventListener('click', handleClick);
         if (debounceRef.current) clearTimeout(debounceRef.current);
       };
     }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -253,7 +293,13 @@ export default function DocumentWorkbench() {
     setFields(prev => prev.map((f, i) => i === index ? { ...f, value } : f));
 
     const field = fields[index];
-    if (field.type !== 'checkbox' && typeof value === 'string') {
+    if (field.type === 'checkbox' && typeof value === 'boolean') {
+      const sdtId = field.source?.nodeIds.find(id => id.startsWith('sdt_'));
+      if (sdtId && editorRef.current) {
+        editorRef.current.updateCheckbox(sdtId, value);
+        setHtmlDraft(editorRef.current.getHtml());
+      }
+    } else if (field.type !== 'checkbox' && typeof value === 'string') {
       const targetId = getValueTarget(field);
       if (targetId && editorRef.current) {
         editorRef.current.updateNode(targetId, value);
@@ -264,40 +310,36 @@ export default function DocumentWorkbench() {
 
   function handleNodeChange(nodeId: string, text: string) {
     setFields(prev => prev.map(f => {
+      // Checkbox runs carry sdt_* node IDs — match by presence in source.nodeIds
+      if (f.type === 'checkbox' && f.source?.nodeIds.includes(nodeId)) {
+        return { ...f, value: text === '☒' };
+      }
       return getValueTarget(f) === nodeId ? { ...f, value: text } : f;
     }));
-  }
-
-  function buildPatches(fieldList: ExtractedField[]) {
-    const patches: object[] = [];
-    for (const field of fieldList) {
-      const nodeIds = field.source?.nodeIds ?? [];
-      if (field.type === 'checkbox') {
-        const sdtId = nodeIds.find(id => id.startsWith('sdt_'));
-        if (sdtId) patches.push({ node_id: sdtId, operation: 'toggle_checkbox', checked: Boolean(field.value) });
-      } else {
-        const val = field.value;
-        if (val === null || val === '') continue;
-        const runIds = nodeIds.filter(id => id.startsWith('r_'));
-        const targetId = runIds[runIds.length - 1];
-        if (targetId) patches.push({ node_id: targetId, operation: 'replace_text', text: String(val) });
-      }
-    }
-    return patches;
   }
 
   function buildPatchesFromHtml(html: string) {
     const doc = new DOMParser().parseFromString(html, 'text/html');
     const patches: Array<Record<string, unknown>> = [];
+
+    // Run-level nodes — text or checkbox
     doc.querySelectorAll('[data-node-kind="run"][data-node-id]').forEach(el => {
-      const nodeId = el.getAttribute('data-node-id');
-      if (!nodeId) return;
+      const nodeId = el.getAttribute('data-node-id')!;
       if (el.querySelector('[data-type="checkbox"]')) {
         patches.push({ node_id: nodeId, operation: 'toggle_checkbox', checked: el.textContent?.includes('☒') ?? false });
       } else {
         patches.push({ node_id: nodeId, operation: 'replace_text', text: el.textContent ?? '' });
       }
     });
+
+    // Paragraph-level nodes that have no child run nodes (empty value-cell paragraphs
+    // where the user typed directly into the paragraph rather than into a run)
+    doc.querySelectorAll('[data-node-kind="paragraph"][data-node-id]').forEach(el => {
+      const nodeId = el.getAttribute('data-node-id')!;
+      if (el.querySelector('[data-node-kind="run"]')) return; // runs already captured above
+      patches.push({ node_id: nodeId, operation: 'replace_text', text: el.textContent ?? '' });
+    });
+
     return patches;
   }
 
@@ -512,9 +554,7 @@ export default function DocumentWorkbench() {
     setExportBusy(true);
     setExportDownloadUrl(null);
     try {
-      const patches = fields.length > 0
-        ? buildPatches(fields)
-        : buildPatchesFromHtml(htmlDraft);
+      const patches = buildPatchesFromHtml(htmlDraft);
       const resp = await fetch(`${PRESIGN_URL}?action=export-docx`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
