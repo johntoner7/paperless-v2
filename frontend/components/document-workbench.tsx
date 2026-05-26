@@ -3,7 +3,7 @@
 import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import {
   FileText, Upload, Wand2, RefreshCw, SplitSquareHorizontal, X,
-  Download, Save, BookOpen, ChevronDown,
+  Download, Save, BookOpen, ChevronDown, Menu, Maximize2, Minimize2,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -246,6 +246,8 @@ export default function DocumentWorkbench() {
   const [exportDownloadUrl, setExportDownloadUrl] = useState<string | null>(null);
   const [runHtml, setRunHtml] = useState(true);
   const [runFields, setRunFields] = useState(true);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [focusMode, setFocusMode] = useState(false);
   const skipRestoreRef = useRef(false);
   const statusRef = useRef(status);
   const editorRef = useRef<HtmlEditorHandle>(null);
@@ -586,11 +588,263 @@ export default function DocumentWorkbench() {
     ? <Badge variant="outline" className="text-red-500 border-red-200 bg-red-50">Fields failed</Badge>
     : null;
 
+  /* ── Shared sub-elements ── */
+  const modeToggle = (
+    <div className="flex rounded-md border border-input overflow-hidden text-sm">
+      <button
+        className={cn(
+          'h-8 px-3 transition-colors',
+          mode === 'html' ? 'bg-sky-500 text-white' : 'bg-background text-muted-foreground hover:bg-accent',
+        )}
+        onClick={() => setMode('html')}
+      >
+        HTML
+      </button>
+      <button
+        className={cn(
+          'h-8 px-3 transition-colors flex items-center gap-1.5 border-l border-input',
+          mode === 'fields' ? 'bg-sky-500 text-white' : 'bg-background text-muted-foreground hover:bg-accent',
+        )}
+        onClick={() => setMode('fields')}
+      >
+        Fields
+        {fields.length > 0 && (
+          <span className={cn(
+            'text-xs rounded-full min-w-[18px] text-center px-1',
+            mode === 'fields' ? 'bg-white/20 text-white' : 'bg-muted text-muted-foreground',
+          )}>
+            {fields.length}
+          </span>
+        )}
+      </button>
+    </div>
+  );
+
+  const libraryDropdown = (inMenu = false) => (
+    <div className="relative">
+      <button
+        className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md border border-input bg-background text-sm text-muted-foreground hover:bg-accent transition-colors w-full"
+        onClick={() => setLibraryOpen(v => !v)}
+      >
+        <BookOpen className="h-3.5 w-3.5 shrink-0" />
+        <span className="truncate flex-1 text-left">
+          {selectedKey ? (library.find(i => i.key === selectedKey)?.fileName ?? 'Library') : 'Library'}
+        </span>
+        <ChevronDown className="h-3 w-3 opacity-50 shrink-0" />
+      </button>
+      {libraryOpen && (
+        <div className={cn(
+          'absolute mt-1 z-50 min-w-[260px] rounded-md border bg-white shadow-lg py-1',
+          inMenu ? 'left-0 right-0' : 'top-full left-0',
+        )}>
+          {library.length === 0 && (
+            <p className="px-3 py-2 text-sm text-muted-foreground">No documents yet.</p>
+          )}
+          {library.map(item => (
+            <button
+              key={item.key}
+              className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-accent text-left"
+              onClick={() => { setLibraryOpen(false); setMobileMenuOpen(false); void loadDoc(item.key); }}
+            >
+              <FileText className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+              <span className="truncate">{item.fileName}</span>
+              {item.status !== 'ready' && (
+                <Badge variant="warning" className="ml-auto shrink-0 text-[10px]">processing</Badge>
+              )}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+
   return (
     <div className="flex flex-col flex-1 overflow-hidden bg-background">
 
+      {/* ══════════════════════════════════════════
+          MOBILE chrome (hidden on sm+)
+          ══════════════════════════════════════════ */}
+      {!focusMode && (
+        <div className="sm:hidden flex flex-col shrink-0 bg-white border-b">
+
+          {/* Mobile top bar */}
+          <div className="flex items-center gap-2 px-3 h-11">
+            <button
+              onClick={() => setMobileMenuOpen(v => !v)}
+              className="h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:bg-accent transition-colors shrink-0"
+              aria-label="Toggle menu"
+            >
+              {mobileMenuOpen ? <X className="h-4 w-4" /> : <Menu className="h-4 w-4" />}
+            </button>
+
+            <span className="flex-1 text-sm truncate text-muted-foreground">
+              {docTitle || 'No document open'}
+            </span>
+
+            <div className="flex items-center gap-1.5">
+              {convertingBadge}
+              {extractBadge}
+              {modeToggle}
+              <button
+                onClick={() => void handleSave()}
+                disabled={!isReady}
+                title="Save HTML"
+                className="h-8 w-8 flex items-center justify-center rounded-md border border-sky-200 text-sky-700 hover:bg-sky-50 disabled:opacity-40 transition-colors shrink-0"
+              >
+                <Save className="h-3.5 w-3.5" />
+              </button>
+              <button
+                onClick={() => void handleExportDocx()}
+                disabled={!originalKey || exportBusy}
+                title="Export DOCX"
+                className="h-8 w-8 flex items-center justify-center rounded-md border border-emerald-200 text-emerald-700 hover:bg-emerald-50 disabled:opacity-40 transition-colors shrink-0"
+              >
+                <Download className="h-3.5 w-3.5" />
+              </button>
+              {isReady && (
+                <button
+                  onClick={() => setFocusMode(true)}
+                  title="Focus document"
+                  className="h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:bg-accent transition-colors shrink-0"
+                >
+                  <Maximize2 className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Mobile collapsible menu */}
+          {mobileMenuOpen && (
+            <div className="px-3 pb-3 flex flex-col gap-3 border-t">
+              {/* Upload + Convert */}
+              <div className="flex items-center gap-2 pt-3 flex-wrap">
+                <label
+                  htmlFor="docx-upload-mobile"
+                  className={cn(
+                    'inline-flex items-center gap-1.5 h-8 px-3 rounded-md border text-sm cursor-pointer transition-colors flex-1 min-w-0',
+                    sourceFile
+                      ? 'border-primary/30 bg-primary/5 text-primary font-medium'
+                      : 'border-input bg-background text-muted-foreground hover:bg-accent',
+                  )}
+                >
+                  <Upload className="h-3.5 w-3.5 shrink-0" />
+                  <span className="truncate">{sourceFile ? sourceFile.name : 'Choose DOCX'}</span>
+                </label>
+                <input id="docx-upload-mobile" type="file" accept=".docx" className="sr-only" onChange={handleFileChange} />
+                <Button
+                  size="sm"
+                  className="bg-sky-500 hover:bg-sky-600 text-white border-0 shrink-0"
+                  onClick={() => { void handleConvert(); setMobileMenuOpen(false); }}
+                  disabled={!sourceFile || status === 'converting'}
+                >
+                  <Wand2 className="h-3.5 w-3.5" />
+                  Convert
+                </Button>
+              </div>
+
+              {/* Pipeline toggles */}
+              <div className="flex flex-wrap gap-2">
+                {[
+                  { label: 'HTML', checked: runHtml, set: setRunHtml },
+                  { label: 'Fields', checked: runFields, set: setRunFields },
+                  { label: 'AI Convert', checked: useAIConvert, set: setUseAIConvert },
+                  { label: 'AI Extract', checked: useAIExtract, set: setUseAIExtract },
+                ].map(({ label, checked, set }) => (
+                  <label key={label} className="inline-flex items-center gap-2 h-8 px-3 rounded-md border border-input bg-background text-sm cursor-pointer hover:bg-accent transition-colors">
+                    <input type="checkbox" checked={checked} onChange={e => set(e.target.checked)} className="w-4 h-4 rounded" />
+                    <span className="text-muted-foreground">{label}</span>
+                  </label>
+                ))}
+              </div>
+
+              {/* Library + refresh */}
+              <div className="flex items-center gap-2">
+                <div className="flex-1 min-w-0">{libraryDropdown(true)}</div>
+                <Button
+                  variant="ghost" size="icon"
+                  className="h-8 w-8 shrink-0"
+                  title="Refresh library"
+                  onClick={() => void fetchLibrary().catch(console.error)}
+                >
+                  <RefreshCw className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+
+              {/* Retry + Compare + Export download */}
+              <div className="flex flex-wrap gap-2">
+                {originalKey && status !== 'converting' && runHtml && (
+                  <button
+                    onClick={() => { void retryConvert(); setMobileMenuOpen(false); }}
+                    className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md border border-input bg-background text-sm text-muted-foreground hover:bg-accent transition-colors"
+                  >
+                    <RefreshCw className="h-3 w-3" /> Retry HTML
+                  </button>
+                )}
+                {originalKey && extractStatus !== 'extracting' && runFields && (
+                  <button
+                    onClick={() => { void retryExtract(); setMobileMenuOpen(false); }}
+                    className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md border border-input bg-background text-sm text-muted-foreground hover:bg-accent transition-colors"
+                  >
+                    <RefreshCw className="h-3 w-3" /> Retry Fields
+                  </button>
+                )}
+                {canCompare && mode === 'html' && (
+                  <button
+                    onClick={() => { setShowCompare(v => !v); setMobileMenuOpen(false); }}
+                    className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md border border-input bg-background text-sm text-muted-foreground hover:bg-accent transition-colors"
+                  >
+                    <SplitSquareHorizontal className="h-3 w-3" />
+                    {showCompare ? 'Close original' : 'Compare'}
+                  </button>
+                )}
+                {exportDownloadUrl && (
+                  <a
+                    href={exportDownloadUrl}
+                    download
+                    className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md border border-emerald-300 bg-emerald-50 text-sm text-emerald-700 hover:bg-emerald-100 transition-colors"
+                  >
+                    <Download className="h-3 w-3" /> Download DOCX
+                  </a>
+                )}
+                {isReady && (
+                  <button
+                    onClick={() => { void handlePdf(); setMobileMenuOpen(false); }}
+                    className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md bg-sky-500 text-white text-sm hover:bg-sky-600 transition-colors"
+                  >
+                    <Download className="h-3 w-3" /> PDF
+                  </button>
+                )}
+              </div>
+
+              {savedAt && <p className="text-xs text-muted-foreground">Saved at {savedAt}</p>}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Focus mode exit bar (mobile only) */}
+      {focusMode && (
+        <div className="sm:hidden flex items-center justify-between px-3 h-9 bg-white border-b shrink-0">
+          <span className="text-xs text-muted-foreground truncate">{docTitle}</span>
+          <div className="flex items-center gap-1.5">
+            {modeToggle}
+            <button
+              onClick={() => setFocusMode(false)}
+              className="h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:bg-accent transition-colors"
+              title="Exit focus mode"
+            >
+              <Minimize2 className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ══════════════════════════════════════════
+          DESKTOP chrome (hidden on mobile)
+          ══════════════════════════════════════════ */}
+
       {/* ── Document actions bar ── */}
-      <header className="flex items-center gap-3 px-4 h-10 border-b bg-white shrink-0">
+      <header className="hidden sm:flex items-center gap-3 px-4 h-10 border-b bg-white shrink-0">
         {docTitle
           ? <span className="text-sm text-muted-foreground truncate max-w-[160px] sm:max-w-xs">{docTitle}</span>
           : <span className="text-sm text-muted-foreground/40 italic">No document open</span>
@@ -616,10 +870,10 @@ export default function DocumentWorkbench() {
               <RefreshCw className="h-3 w-3" />
             </button>
           )}
-          {savedAt && <span className="text-xs text-muted-foreground hidden sm:block">Saved {savedAt}</span>}
+          {savedAt && <span className="text-xs text-muted-foreground">Saved {savedAt}</span>}
           <Button variant="outline" size="sm" className="border-sky-200 text-sky-700 hover:bg-sky-50 h-7 text-xs" onClick={() => void handleSave()} disabled={!isReady}>
             <Save className="h-3 w-3" />
-            <span className="hidden sm:inline">Save HTML</span>
+            Save HTML
           </Button>
           <Button
             variant="outline" size="sm"
@@ -628,7 +882,7 @@ export default function DocumentWorkbench() {
             disabled={!originalKey || exportBusy}
           >
             <Download className="h-3 w-3" />
-            <span className="hidden sm:inline">{exportBusy ? 'Exporting…' : 'Export DOCX'}</span>
+            {exportBusy ? 'Exporting…' : 'Export DOCX'}
           </Button>
           {exportDownloadUrl && (
             <a
@@ -637,19 +891,18 @@ export default function DocumentWorkbench() {
               className="inline-flex items-center gap-1 h-7 px-2 rounded border border-emerald-300 bg-emerald-50 text-xs text-emerald-700 hover:bg-emerald-100 transition-colors"
             >
               <Download className="h-3 w-3" />
-              <span className="hidden sm:inline">Download</span>
+              Download
             </a>
           )}
           <Button size="sm" className="bg-sky-500 hover:bg-sky-600 text-white border-0 h-7 text-xs" onClick={() => void handlePdf()} disabled={!isReady}>
             <Download className="h-3 w-3" />
-            <span className="hidden sm:inline">PDF</span>
+            PDF
           </Button>
         </div>
       </header>
 
       {/* ── Toolbar ── */}
-      <div className="flex items-center gap-2 px-4 py-2.5 border-b bg-white shrink-0 flex-wrap">
-        {/* file pick + convert */}
+      <div className="hidden sm:flex items-center gap-2 px-4 py-2.5 border-b bg-white shrink-0 flex-wrap">
         <label
           htmlFor="docx-upload"
           className={cn(
@@ -694,41 +947,9 @@ export default function DocumentWorkbench() {
           Convert
         </Button>
 
-        <Separator orientation="vertical" className="h-5 mx-1 hidden sm:block" />
+        <Separator orientation="vertical" className="h-5 mx-1" />
 
-        {/* library picker */}
-        <div className="relative">
-          <button
-            className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md border border-input bg-background text-sm text-muted-foreground hover:bg-accent transition-colors"
-            onClick={() => setLibraryOpen(v => !v)}
-          >
-            <BookOpen className="h-3.5 w-3.5" />
-            {selectedKey
-              ? (library.find(i => i.key === selectedKey)?.fileName ?? 'Library')
-              : 'Library'}
-            <ChevronDown className="h-3 w-3 opacity-50" />
-          </button>
-          {libraryOpen && (
-            <div className="absolute top-full left-0 mt-1 z-50 min-w-[260px] rounded-md border bg-white shadow-lg py-1">
-              {library.length === 0 && (
-                <p className="px-3 py-2 text-sm text-muted-foreground">No documents yet.</p>
-              )}
-              {library.map(item => (
-                <button
-                  key={item.key}
-                  className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-accent text-left"
-                  onClick={() => { setLibraryOpen(false); void loadDoc(item.key); }}
-                >
-                  <FileText className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                  <span className="truncate">{item.fileName}</span>
-                  {item.status !== 'ready' && (
-                    <Badge variant="warning" className="ml-auto shrink-0 text-[10px]">processing</Badge>
-                  )}
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
+        {libraryDropdown()}
 
         <Button
           variant="ghost" size="icon"
@@ -741,11 +962,10 @@ export default function DocumentWorkbench() {
 
         {canCompare && mode === 'html' && (
           <>
-            <Separator orientation="vertical" className="h-5 mx-1 hidden sm:block" />
+            <Separator orientation="vertical" className="h-5 mx-1" />
             <Button
               variant={showCompare ? 'secondary' : 'outline'}
               size="sm"
-              className="hidden sm:inline-flex"
               onClick={() => setShowCompare(v => !v)}
             >
               {showCompare
@@ -756,35 +976,8 @@ export default function DocumentWorkbench() {
           </>
         )}
 
-        <Separator orientation="vertical" className="h-5 mx-1 hidden sm:block" />
-        <div className="flex rounded-md border border-input overflow-hidden text-sm">
-          <button
-            className={cn(
-              'h-8 px-3 transition-colors',
-              mode === 'html' ? 'bg-sky-500 text-white' : 'bg-background text-muted-foreground hover:bg-accent',
-            )}
-            onClick={() => setMode('html')}
-          >
-            HTML
-          </button>
-          <button
-            className={cn(
-              'h-8 px-3 transition-colors flex items-center gap-1.5 border-l border-input',
-              mode === 'fields' ? 'bg-sky-500 text-white' : 'bg-background text-muted-foreground hover:bg-accent',
-            )}
-            onClick={() => setMode('fields')}
-          >
-            Fields
-            {fields.length > 0 && (
-              <span className={cn(
-                'text-xs rounded-full min-w-[18px] text-center px-1',
-                mode === 'fields' ? 'bg-white/20 text-white' : 'bg-muted text-muted-foreground',
-              )}>
-                {fields.length}
-              </span>
-            )}
-          </button>
-        </div>
+        <Separator orientation="vertical" className="h-5 mx-1" />
+        {modeToggle}
       </div>
 
       {/* ── Notification banner ── */}
@@ -816,11 +1009,22 @@ export default function DocumentWorkbench() {
 
           {/* HTML editor pane */}
           <div className="flex flex-col flex-1 overflow-hidden">
-            <div className="flex items-center gap-2 px-4 h-10 border-b bg-muted/30 shrink-0">
+            <div className="hidden sm:flex items-center gap-2 px-4 h-10 border-b bg-muted/30 shrink-0">
               <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Converted HTML</span>
               {docTitle && <span className="text-xs text-muted-foreground">· {docTitle}</span>}
               {isReady && <Badge variant="outline" className="ml-auto text-[10px] text-muted-foreground">editable</Badge>}
             </div>
+
+            {/* Disclaimer — outside the scroll area so it stays pinned */}
+            {isReady && (
+              <div className="shrink-0 flex items-start gap-2 px-4 py-2 border-b bg-amber-50 text-xs text-amber-700">
+                <span className="shrink-0 mt-0.5">⚠</span>
+                <span>
+                  This is an approximate HTML preview — layout and styling may differ from the original.
+                  The exported DOCX will closely match the original document.
+                </span>
+              </div>
+            )}
 
             <div className="flex-1 overflow-hidden">
               {!isReady && !htmlDraft ? (
@@ -860,8 +1064,8 @@ export default function DocumentWorkbench() {
       </div>
 
       {/* close library dropdown on outside click */}
-      {libraryOpen && (
-        <div className="fixed inset-0 z-40" onClick={() => setLibraryOpen(false)} />
+      {(libraryOpen || mobileMenuOpen) && (
+        <div className="fixed inset-0 z-40" onClick={() => { setLibraryOpen(false); }} />
       )}
     </div>
   );

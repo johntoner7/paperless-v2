@@ -34,6 +34,8 @@
   line-height: 1.75;
   color: hsl(240 10% 3.9%);
   padding: 28px 32px;
+  /* Allow pinch-to-zoom even though the div is contentEditable */
+  touch-action: pan-x pan-y pinch-zoom;
 }
 .editor-prose:focus { outline: none; }
 .editor-prose h1,
@@ -88,6 +90,13 @@
   outline: 1px dashed rgba(59, 130, 246, 0.35);
   outline-offset: 1px;
   border-radius: 2px;
+}
+
+/* Empty paragraphs in table cells need min-height so they can be hovered/clicked */
+.editor-prose td .docx-empty-paragraph,
+.editor-prose th .docx-empty-paragraph {
+  min-height: 1.4em;
+  display: block;
 }
 
 /* Checkbox spans are click-only — not free-text editable */
