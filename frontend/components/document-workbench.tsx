@@ -561,6 +561,24 @@ export default function DocumentWorkbench() {
     setNotification({ type: 'success', message: 'HTML saved.' });
   }
 
+  async function handlePdf() {
+    if (status !== 'ready') return;
+    setNotification(null);
+    try {
+      const h2p = (await import('html2pdf.js')).default;
+      const el = Object.assign(document.createElement('div'), { innerHTML: htmlDraft });
+      await h2p().set({
+        margin: 18, filename: `${docTitle}.pdf`,
+        image: { type: 'jpeg', quality: 0.98 },
+        html2canvas: { scale: 2, useCORS: true },
+        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
+      }).from(el).save();
+      setNotification({ type: 'success', message: 'PDF downloaded.' });
+    } catch (e) {
+      setNotification({ type: 'error', message: e instanceof Error ? e.message : 'PDF generation failed.' });
+    }
+  }
+
   async function handleExportDocx() {
     if (!originalKey) return;
     setNotification(null);
@@ -710,6 +728,14 @@ export default function DocumentWorkbench() {
                 <Save className="h-3.5 w-3.5 text-muted-foreground" />
                 Save HTML
               </button>
+              <button
+                className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-accent text-left disabled:opacity-40"
+                onClick={() => { void handlePdf(); setOverflowOpen(false); }}
+                disabled={!isReady}
+              >
+                <Download className="h-3.5 w-3.5 text-muted-foreground" />
+                Download PDF
+              </button>
               {canCompare && mode === 'html' && (
                 <button
                   className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-accent text-left"
@@ -820,19 +846,17 @@ export default function DocumentWorkbench() {
                   </p>
                 </div>
               ) : (
-                <div ref={paneRef} className="document-pane h-full">
-                  <div style={docZoom !== 1 ? { zoom: docZoom } : undefined}>
-                    <HtmlEditor
-                      ref={editorRef}
-                      key={docTitle}
-                      initialHtml={htmlDraft}
-                      onChange={h => {
-                        setHtmlDraft(h);
-                        localStorage.setItem(draftKey, h);
-                      }}
-                      onNodeChange={handleNodeChange}
-                    />
-                  </div>
+                <div className="document-pane h-full">
+                  <HtmlEditor
+                    ref={editorRef}
+                    key={docTitle}
+                    initialHtml={htmlDraft}
+                    onChange={h => {
+                      setHtmlDraft(h);
+                      localStorage.setItem(draftKey, h);
+                    }}
+                    onNodeChange={handleNodeChange}
+                  />
                 </div>
               )}
             </div>
