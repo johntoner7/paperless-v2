@@ -258,10 +258,21 @@ def _replace_node_text(node: ET.Element, text: str) -> None:
             text_node.text = ''
         return
 
-    if _local(node.tag) == 'r':
+    local = _local(node.tag)
+    if local == 'r':
         t_new = ET.SubElement(node, f'{W_NS}t')
         t_new.text = text
         t_new.set(XML_SPACE, 'preserve')
+    elif local == 'p':
+        # Empty paragraph (value-cell with no runs yet) — insert a minimal run.
+        # Place it after <w:pPr> if present so paragraph formatting is preserved.
+        r_new = ET.Element(f'{W_NS}r')
+        t_new = ET.SubElement(r_new, f'{W_NS}t')
+        t_new.text = text
+        t_new.set(XML_SPACE, 'preserve')
+        ppr = node.find(f'{W_NS}pPr')
+        insert_pos = list(node).index(ppr) + 1 if ppr is not None else 0
+        node.insert(insert_pos, r_new)
 
 
 def _iter_text_nodes(node: ET.Element):
