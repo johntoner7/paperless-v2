@@ -665,7 +665,7 @@ export default function DocumentWorkbench() {
           MOBILE chrome (hidden on sm+)
           ══════════════════════════════════════════ */}
       {!focusMode && (
-        <div className="sm:hidden flex flex-col shrink-0 bg-white border-b">
+        <div className="sm:hidden flex flex-col shrink-0 bg-white border-b relative z-50">
 
           {/* Mobile top bar */}
           <div className="flex items-center gap-2 px-3 h-11">
@@ -1064,8 +1064,8 @@ export default function DocumentWorkbench() {
       </div>
 
       {/* close library dropdown on outside click */}
-      {(libraryOpen || mobileMenuOpen) && (
-        <div className="fixed inset-0 z-40" onClick={() => { setLibraryOpen(false); }} />
+      {libraryOpen && (
+        <div className="fixed inset-0 z-40" onClick={() => setLibraryOpen(false)} />
       )}
     </div>
   );
