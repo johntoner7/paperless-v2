@@ -198,8 +198,15 @@ def _extract_from_table(table: dict, block_index: int) -> Iterable[dict]:
         if not label_text:
             continue
 
-        has_placeholder = not value_text or _UNDERSCORE_RE.search(value_text)
         checkbox_count = _count_checkboxes_in_cell(cells[1])
+
+        # Skip column-header rows: label has no field indicator (colon/question
+        # mark), value cell has no checkbox and no underscore placeholder.
+        has_field_indicator = ":" in label_text or "?" in label_text
+        if not has_field_indicator and checkbox_count == 0 and not _UNDERSCORE_RE.search(value_text or ""):
+            continue
+
+        has_placeholder = not value_text or _UNDERSCORE_RE.search(value_text)
         if checkbox_count > 0:
             field_type = "choice" if checkbox_count > 1 else "checkbox"
             confidence = 0.85

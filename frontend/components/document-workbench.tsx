@@ -102,6 +102,9 @@ const HtmlEditor = forwardRef<HtmlEditorHandle, {
     const divRef = useRef<HTMLDivElement>(null);
     const isSyncingRef = useRef(false);
     const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    // Stable ref so the observer never needs to be torn down when the callback changes
+    const onNodeChangeRef = useRef(onNodeChange);
+    useEffect(() => { onNodeChangeRef.current = onNodeChange; });
 
     useImperativeHandle(ref, () => ({
       updateNode(nodeId: string, text: string) {
@@ -109,7 +112,7 @@ const HtmlEditor = forwardRef<HtmlEditorHandle, {
         if (!el) return;
         isSyncingRef.current = true;
         el.textContent = text;
-        // Reset after MutationObserver microtask fires (Promise queues after it)
+        // Promise microtask queues after the MutationObserver microtask
         void Promise.resolve().then(() => { isSyncingRef.current = false; });
       },
       getHtml() {
@@ -123,9 +126,10 @@ const HtmlEditor = forwardRef<HtmlEditorHandle, {
       }
     }, [initialHtml]);
 
+    // Mount/unmount only — callback is read via ref so no reconnection on re-renders
     useEffect(() => {
       const el = divRef.current;
-      if (!el || !onNodeChange) return;
+      if (!el) return;
 
       const observer = new MutationObserver((mutations) => {
         if (isSyncingRef.current) return;
@@ -135,15 +139,26 @@ const HtmlEditor = forwardRef<HtmlEditorHandle, {
             : (mutation.target instanceof Element ? mutation.target : null);
           if (!target) continue;
 
-          const run = target.closest('[data-node-kind="run"]');
-          if (!run) continue;
+          // Run-level node (pre-filled value fields)
+          const runEl = target.closest('[data-node-kind="run"]');
+          if (runEl) {
+            const nodeId = runEl.getAttribute('data-node-id');
+            if (!nodeId) continue;
+            const text = runEl.textContent ?? '';
+            if (debounceRef.current) clearTimeout(debounceRef.current);
+            debounceRef.current = setTimeout(() => onNodeChangeRef.current?.(nodeId, text), 300);
+            continue;
+          }
 
-          const nodeId = run.getAttribute('data-node-id');
-          if (!nodeId) continue;
-
-          const text = run.textContent ?? '';
-          if (debounceRef.current) clearTimeout(debounceRef.current);
-          debounceRef.current = setTimeout(() => onNodeChange(nodeId, text), 300);
+          // Paragraph-level node (empty value cells in table fields)
+          const paraEl = target.closest('[data-node-kind="paragraph"]');
+          if (paraEl) {
+            const nodeId = paraEl.getAttribute('data-node-id');
+            if (!nodeId) continue;
+            const text = paraEl.textContent ?? '';
+            if (debounceRef.current) clearTimeout(debounceRef.current);
+            debounceRef.current = setTimeout(() => onNodeChangeRef.current?.(nodeId, text), 300);
+          }
         }
       });
 
@@ -152,7 +167,7 @@ const HtmlEditor = forwardRef<HtmlEditorHandle, {
         observer.disconnect();
         if (debounceRef.current) clearTimeout(debounceRef.current);
       };
-    }, [onNodeChange]);
+    }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
     return (
       <div
@@ -223,13 +238,23 @@ export default function DocumentWorkbench() {
     }
   }
 
+  // Determine the value target node for a field.
+  // If the last node in nodeIds is a p_* (empty value cell), target that paragraph.
+  // Otherwise target the last r_* run (pre-filled value or label:value paragraph).
+  function getValueTarget(field: ExtractedField): string | undefined {
+    const nodeIds = field.source?.nodeIds ?? [];
+    if (nodeIds.length === 0) return undefined;
+    const last = nodeIds[nodeIds.length - 1];
+    if (last.startsWith('p_')) return last;
+    return nodeIds.filter(id => id.startsWith('r_')).at(-1);
+  }
+
   function updateFieldValue(index: number, value: string | boolean) {
     setFields(prev => prev.map((f, i) => i === index ? { ...f, value } : f));
 
     const field = fields[index];
     if (field.type !== 'checkbox' && typeof value === 'string') {
-      const nodeIds = field.source?.nodeIds ?? [];
-      const targetId = nodeIds.filter(id => id.startsWith('r_')).at(-1);
+      const targetId = getValueTarget(field);
       if (targetId && editorRef.current) {
         editorRef.current.updateNode(targetId, value);
         setHtmlDraft(editorRef.current.getHtml());
@@ -239,8 +264,7 @@ export default function DocumentWorkbench() {
 
   function handleNodeChange(nodeId: string, text: string) {
     setFields(prev => prev.map(f => {
-      const targetId = (f.source?.nodeIds ?? []).filter(id => id.startsWith('r_')).at(-1);
-      return targetId === nodeId ? { ...f, value: text } : f;
+      return getValueTarget(f) === nodeId ? { ...f, value: text } : f;
     }));
   }
 

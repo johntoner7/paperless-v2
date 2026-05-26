@@ -50,6 +50,12 @@ def apply_patches(docx_bytes: bytes, patches: list[dict]) -> bytes:
         files = {name: zin.read(name) for name in zin.namelist()}
         infos = {info.filename: info for info in zin.infolist()}
 
+    # Register every namespace declared in the source XML so ET doesn't
+    # mangle unknown prefixes to ns0:, ns1:, etc. on re-serialization.
+    for name, data in files.items():
+        if name.endswith('.xml') or name.endswith('.rels'):
+            _register_namespaces_from_bytes(data)
+
     roots = _load_docx_xml_roots(files)
     id_counters = {"p": 0, "r": 0, "sdt": 0}
     for root in roots.values():
@@ -72,6 +78,10 @@ def apply_patches(docx_bytes: bytes, patches: list[dict]) -> bytes:
 
         _apply_legacy_patch(document_root, patch)
 
+    # Strip injected node IDs — they are invalid OOXML and corrupt the file in Word.
+    for root in roots.values():
+        _strip_node_ids(root)
+
     for part_name, root in roots.items():
         files[part_name] = _serialize_xml(root)
 
@@ -82,6 +92,21 @@ def apply_patches(docx_bytes: bytes, patches: list[dict]) -> bytes:
             info = infos.get(name)
             zout.writestr(info or name, data)
     return out.getvalue()
+
+
+def _register_namespaces_from_bytes(xml_bytes: bytes) -> None:
+    """Register all namespace prefix→URI mappings declared in the XML bytes."""
+    try:
+        for _, (prefix, uri) in ET.iterparse(io.BytesIO(xml_bytes), events=('start-ns',)):
+            ET.register_namespace(prefix, uri)
+    except ET.ParseError:
+        pass
+
+
+def _strip_node_ids(root: ET.Element) -> None:
+    """Remove injected docx-node-id attributes before writing output."""
+    for elem in root.iter():
+        elem.attrib.pop(NODE_ID_ATTR, None)
 
 
 def _load_docx_xml_roots(files: dict[str, bytes]) -> dict[str, ET.Element]:
