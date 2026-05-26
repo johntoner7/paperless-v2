@@ -184,9 +184,9 @@ def _build_page_css(page_setup: dict) -> str:
 
     return (
         f".document{{background:#e0e0e0;padding:24px;display:flex;flex-direction:column;align-items:center;gap:24px}}"
-        f".docx-page{{width:{w_px}px;height:{h_px}px;background:white;box-shadow:0 2px 8px rgba(0,0,0,.25);box-sizing:border-box;display:flex;flex-direction:column;overflow:hidden}}"
+        f".docx-page{{width:{w_px}px;background:white;box-shadow:0 2px 8px rgba(0,0,0,.25);box-sizing:border-box;display:flex;flex-direction:column}}"
         f".docx-page-header{{padding:{mt}px {mr}px 0 {ml}px;{font}}}"
-        f".docx-page-content{{flex:1;padding:0 {mr}px 0 {ml}px;{font};overflow:hidden}}"
+        f".docx-page-content{{flex:1;padding:0 {mr}px 0 {ml}px;{font}}}"
         f".docx-page-footer{{padding:0 {mr}px {mb}px {ml}px;{font}}}"
         # Reset browser block element margins to match Word paragraph spacing
         f"{block_sel}{{margin-top:{para_mt}px;margin-bottom:{para_mb}px}}"

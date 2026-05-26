@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 import re
 from typing import Iterable, Optional
+
+logger = logging.getLogger(__name__)
 
 
 _UNDERSCORE_RE = re.compile(r"_{3,}")
@@ -73,7 +77,12 @@ def suggest_fields_with_ai(ast: dict, model: str = "claude-sonnet-4-6") -> list[
     try:
         try:
             import anthropic
-        except ModuleNotFoundError:
+        except ModuleNotFoundError as exc:
+            logger.warning('suggest_fields_with_ai: anthropic not available (%s)', exc)
+            return []
+
+        if not os.environ.get('ANTHROPIC_API_KEY'):
+            logger.warning('suggest_fields_with_ai: ANTHROPIC_API_KEY not set')
             return []
 
         client = anthropic.Anthropic()
@@ -84,7 +93,8 @@ def suggest_fields_with_ai(ast: dict, model: str = "claude-sonnet-4-6") -> list[
             messages=[{"role": "user", "content": user_prompt}],
         )
         raw = response.content[0].text
-    except Exception:
+    except Exception as exc:
+        logger.error('suggest_fields_with_ai: API call failed: %s', exc, exc_info=True)
         return []
 
     parsed = _parse_ai_response(raw)

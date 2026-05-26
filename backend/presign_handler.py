@@ -296,8 +296,15 @@ def lambda_handler(event, context):
 
                 if use_ai:
                     extracted = extract_fields_from_ast_with_ai(ast)
+                    rule_count = len(extract_fields_from_ast(ast).get('fields', []))
+                    total_count = len(extracted.get('fields', []))
+                    logger.info(
+                        'extract: AI path complete key=%s rule_fields=%d total_fields=%d',
+                        key, rule_count, total_count,
+                    )
                 else:
                     extracted = extract_fields_from_ast(ast)
+                    logger.info('extract: rule path complete key=%s fields=%d', key, len(extracted.get('fields', [])))
 
                 s3.put_object(
                     Bucket=BUCKET,
