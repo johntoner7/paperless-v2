@@ -728,14 +728,6 @@ export default function DocumentWorkbench() {
                 <Save className="h-3.5 w-3.5 text-muted-foreground" />
                 Save HTML
               </button>
-              <button
-                className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-accent text-left disabled:opacity-40"
-                onClick={() => { void handlePdf(); setOverflowOpen(false); }}
-                disabled={!isReady}
-              >
-                <Download className="h-3.5 w-3.5 text-muted-foreground" />
-                Download PDF
-              </button>
               {canCompare && mode === 'html' && (
                 <button
                   className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-accent text-left"
