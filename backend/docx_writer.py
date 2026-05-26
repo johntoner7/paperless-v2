@@ -1,5 +1,6 @@
 """Apply identity-based patches to a DOCX file, return modified DOCX bytes."""
 import io
+import re
 import zipfile
 import xml.etree.ElementTree as ET
 
@@ -13,7 +14,8 @@ W14_NS = '{http://schemas.microsoft.com/office/word/2010/wordml}'
 XML_SPACE = '{http://www.w3.org/XML/1998/namespace}space'
 REL_NS = 'http://schemas.openxmlformats.org/package/2006/relationships'
 
-# Register all common DOCX namespace prefixes so ET serialises them correctly
+# Seed the ET namespace registry with the most common DOCX prefixes.
+# _collect_namespaces() will register the rest from the actual source document.
 DOCX_NS = {
     'wpc': 'http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas',
     'mc':  'http://schemas.openxmlformats.org/markup-compatibility/2006',
@@ -50,11 +52,16 @@ def apply_patches(docx_bytes: bytes, patches: list[dict]) -> bytes:
         files = {name: zin.read(name) for name in zin.namelist()}
         infos = {info.filename: info for info in zin.infolist()}
 
-    # Register every namespace declared in the source XML so ET doesn't
-    # mangle unknown prefixes to ns0:, ns1:, etc. on re-serialization.
+    # Collect the full namespace map from each XML part and register all prefixes
+    # with ET so it uses the original prefix aliases when serialising.
+    # We also keep the per-part map so we can re-inject xmlns: declarations that
+    # ET drops for namespaces only referenced as string tokens (e.g. in
+    # mc:Ignorable="w15 w16se …") but not used in any element or attribute name.
+    source_ns_maps: dict[str, dict[str, str]] = {}
     for name, data in files.items():
         if name.endswith('.xml') or name.endswith('.rels'):
-            _register_namespaces_from_bytes(data)
+            ns_map = _collect_namespaces(data)
+            source_ns_maps[name] = ns_map
 
     roots = _load_docx_xml_roots(files)
     id_counters = {"p": 0, "r": 0, "sdt": 0}
@@ -83,7 +90,7 @@ def apply_patches(docx_bytes: bytes, patches: list[dict]) -> bytes:
         _strip_node_ids(root)
 
     for part_name, root in roots.items():
-        files[part_name] = _serialize_xml(root)
+        files[part_name] = _serialize_xml(root, source_ns_maps.get(part_name))
 
     # Re-zip
     out = io.BytesIO()
@@ -94,19 +101,51 @@ def apply_patches(docx_bytes: bytes, patches: list[dict]) -> bytes:
     return out.getvalue()
 
 
-def _register_namespaces_from_bytes(xml_bytes: bytes) -> None:
-    """Register all namespace prefix→URI mappings declared in the XML bytes."""
+def _collect_namespaces(xml_bytes: bytes) -> dict[str, str]:
+    """Collect all namespace prefix→URI mappings from XML bytes and register them with ET."""
+    ns_map: dict[str, str] = {}
     try:
         for _, (prefix, uri) in ET.iterparse(io.BytesIO(xml_bytes), events=('start-ns',)):
-            ET.register_namespace(prefix, uri)
+            if prefix not in ns_map:
+                ns_map[prefix] = uri
+                if prefix:
+                    ET.register_namespace(prefix, uri)
     except ET.ParseError:
         pass
+    return ns_map
 
 
 def _strip_node_ids(root: ET.Element) -> None:
     """Remove injected docx-node-id attributes before writing output."""
     for elem in root.iter():
         elem.attrib.pop(NODE_ID_ATTR, None)
+
+
+def _serialize_xml(root: ET.Element, source_ns_map: dict[str, str] | None = None) -> bytes:
+    xml_str = ET.tostring(root, encoding='unicode')
+    if source_ns_map:
+        xml_str = _inject_missing_xmlns(xml_str, source_ns_map)
+    return b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n' + xml_str.encode('utf-8')
+
+
+def _inject_missing_xmlns(xml_str: str, source_ns_map: dict[str, str]) -> str:
+    """Re-add xmlns: declarations that ET drops for namespaces only referenced
+    as string tokens (e.g. inside mc:Ignorable) but not used in element/attribute names."""
+    # Scan the first 8 KB — enough to cover any root element's attribute list
+    existing = set(re.findall(r'xmlns:(\w+)=', xml_str[:8000]))
+    missing = [
+        f'xmlns:{prefix}="{uri}"'
+        for prefix, uri in source_ns_map.items()
+        if prefix and prefix not in existing
+    ]
+    if not missing:
+        return xml_str
+    # Insert right after the root element name: <w:document<INJECT HERE> ...
+    match = re.match(r'^<[^\s>]+', xml_str)
+    if not match:
+        return xml_str
+    insert_at = match.end()
+    return xml_str[:insert_at] + ' ' + ' '.join(missing) + xml_str[insert_at:]
 
 
 def _load_docx_xml_roots(files: dict[str, bytes]) -> dict[str, ET.Element]:
@@ -261,8 +300,3 @@ def _infer_operation(patch: dict) -> str | None:
     if 'text' in patch:
         return 'replace_text'
     return None
-
-
-def _serialize_xml(root: ET.Element) -> bytes:
-    xml_bytes = ET.tostring(root, encoding='unicode').encode('utf-8')
-    return b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n' + xml_bytes
