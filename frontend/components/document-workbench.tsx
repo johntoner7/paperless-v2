@@ -2,12 +2,11 @@
 
 import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import {
-  FileText, Upload, Wand2, RefreshCw, SplitSquareHorizontal, X,
-  Download, Save, BookOpen, ChevronDown, Menu, Maximize2, Minimize2,
+  FileText, Upload, Wand2, RefreshCw, SplitSquareHorizontal,
+  Download, Save, ChevronDown, MoreHorizontal,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { Separator } from '@/components/ui/separator';
 import { AlertBanner } from '@/components/ui/alert-banner';
 import { FieldPanel } from '@/components/field-panel';
 import type { ExtractedField } from '@/components/field-panel';
@@ -229,9 +228,7 @@ export default function DocumentWorkbench() {
   const [sourceFile, setSourceFile] = useState<File | null>(null);
   const [docTitle, setDocTitle] = useState('');
   const [htmlDraft, setHtmlDraft] = useState('');
-  const [savedAt, setSavedAt] = useState<string | null>(null);
   const [library, setLibrary] = useState<LibraryUpload[]>([]);
-  const [selectedKey, setSelectedKey] = useState('');
   const [docxSource, setDocxSource] = useState<string | null>(null);
   const [originalKey, setOriginalKey] = useState<string | null>(null);
   const [showCompare, setShowCompare] = useState(false);
@@ -244,14 +241,56 @@ export default function DocumentWorkbench() {
   const [mode, setMode] = useState<'html' | 'fields'>('html');
   const [exportBusy, setExportBusy] = useState(false);
   const [exportDownloadUrl, setExportDownloadUrl] = useState<string | null>(null);
-  const [runHtml, setRunHtml] = useState(true);
-  const [runFields, setRunFields] = useState(true);
-  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-  const [focusMode, setFocusMode] = useState(false);
+  const [openMenuOpen, setOpenMenuOpen] = useState(false);
+  const [overflowOpen, setOverflowOpen] = useState(false);
   const skipRestoreRef = useRef(false);
   const statusRef = useRef(status);
   const editorRef = useRef<HtmlEditorHandle>(null);
+  const paneRef = useRef<HTMLDivElement>(null);
+  const [docZoom, setDocZoom] = useState(1);
+  const zoomLiveRef = useRef(1);   // current zoom without triggering renders mid-gesture
+  const zoomBaseRef = useRef(1);   // zoom at the start of each new pinch
+  const pinchStartDist = useRef(0);
   useEffect(() => { statusRef.current = status; }, [status]);
+
+  // Reset zoom when a new document loads
+  useEffect(() => { setDocZoom(1); zoomLiveRef.current = 1; zoomBaseRef.current = 1; }, [docTitle]);
+
+  // Pinch-to-zoom: attach imperatively so we can call preventDefault() on touchmove
+  useEffect(() => {
+    const pane = paneRef.current;
+    if (!pane) return;
+
+    const pinchDist = (t: TouchList) => {
+      const dx = t[0].clientX - t[1].clientX;
+      const dy = t[0].clientY - t[1].clientY;
+      return Math.sqrt(dx * dx + dy * dy);
+    };
+
+    const onStart = (e: TouchEvent) => {
+      if (e.touches.length === 2) pinchStartDist.current = pinchDist(e.touches);
+    };
+
+    const onMove = (e: TouchEvent) => {
+      if (e.touches.length !== 2) return;
+      e.preventDefault(); // block viewport zoom + scroll during pinch
+      const scale = zoomBaseRef.current * (pinchDist(e.touches) / pinchStartDist.current);
+      const clamped = Math.min(Math.max(scale, 0.4), 3);
+      zoomLiveRef.current = clamped;
+      setDocZoom(clamped);
+    };
+
+    const onEnd = () => { zoomBaseRef.current = zoomLiveRef.current; };
+
+    pane.addEventListener('touchstart', onStart, { passive: true });
+    pane.addEventListener('touchmove', onMove, { passive: false });
+    pane.addEventListener('touchend', onEnd);
+    return () => {
+      pane.removeEventListener('touchstart', onStart);
+      pane.removeEventListener('touchmove', onMove);
+      pane.removeEventListener('touchend', onEnd);
+    };
+  }, []);
 
   async function runExtract(key: string, force = false) {
     setExtractStatus('extracting');
@@ -412,10 +451,6 @@ export default function DocumentWorkbench() {
   /* convert */
   async function handleConvert() {
     if (!sourceFile) return;
-    if (!runHtml && !runFields) {
-      setNotification({ type: 'error', message: 'Enable at least one pipeline.' });
-      return;
-    }
     setNotification(null);
     setStatus('converting');
     try {
@@ -433,13 +468,7 @@ export default function DocumentWorkbench() {
       setDocTitle(title);
       setOriginalKey(key);
 
-      if (runFields) void runExtract(key);
-
-      if (!runHtml) {
-        setStatus('idle');
-        void fetchLibrary().catch(console.error);
-        return;
-      }
+      void runExtract(key);
 
       const { html, originalUrl } = await pollHtml(key);
       skipRestoreRef.current = true;
@@ -447,7 +476,7 @@ export default function DocumentWorkbench() {
       setDocxSource(originalUrl); setShowCompare(false);
       setStatus('ready');
       setNotification({ type: 'success', message: 'Conversion complete.' });
-      setSavedAt(null);
+
       localStorage.setItem(`pb:draft:${title}`, html);
       void fetchLibrary().catch(console.error);
     } catch (e) {
@@ -467,7 +496,7 @@ export default function DocumentWorkbench() {
       setDocxSource(originalUrl); setShowCompare(false);
       setStatus('ready');
       setNotification({ type: 'success', message: 'Conversion complete.' });
-      setSavedAt(null);
+
       if (docTitle) localStorage.setItem(`pb:draft:${docTitle}`, html);
       void fetchLibrary().catch(console.error);
     } catch (e) {
@@ -502,10 +531,10 @@ export default function DocumentWorkbench() {
       skipRestoreRef.current = true;
       setDocTitle(title); setSourceFile(null); setHtmlDraft(html);
       setDocxSource(result.originalUrl ?? null); setOriginalKey(key); setShowCompare(false);
-      setSelectedKey(key); setStatus('ready');
+      setStatus('ready');
       setNotification({ type: 'success', message: `Opened ${entry.fileName}` });
       void runExtract(key);
-      setSavedAt(null);
+
       localStorage.setItem(`pb:draft:${title}`, html);
     } catch (e) {
       setStatus('idle');
@@ -528,26 +557,8 @@ export default function DocumentWorkbench() {
     const ts = new Date().toISOString().replace(/[:.]/g, '-');
     downloadBlob(`${docTitle || 'document'}-${ts}.html`, htmlDraft, 'text/html;charset=utf-8');
     localStorage.setItem(draftKey, htmlDraft);
-    setSavedAt(new Date().toLocaleTimeString());
-    setNotification({ type: 'success', message: 'HTML saved.' });
-  }
 
-  async function handlePdf() {
-    if (status !== 'ready') return;
-    setNotification(null);
-    try {
-      const h2p = (await import('html2pdf.js')).default;
-      const el = Object.assign(document.createElement('div'), { innerHTML: htmlDraft });
-      await h2p().set({
-        margin: 18, filename: `${docTitle}.pdf`,
-        image: { type: 'jpeg', quality: 0.98 },
-        html2canvas: { scale: 2, useCORS: true },
-        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
-      }).from(el).save();
-      setNotification({ type: 'success', message: 'PDF downloaded.' });
-    } catch (e) {
-      setNotification({ type: 'error', message: e instanceof Error ? e.message : 'PDF generation failed.' });
-    }
+    setNotification({ type: 'success', message: 'HTML saved.' });
   }
 
   async function handleExportDocx() {
@@ -576,409 +587,191 @@ export default function DocumentWorkbench() {
   const isReady = status === 'ready';
   const canCompare = isReady && docxSource !== null;
 
-  const convertingBadge = status === 'converting'
-    ? <Badge variant="warning" className="animate-pulse">Converting…</Badge>
-    : null;
-
-  const extractBadge = extractStatus === 'extracting'
-    ? <Badge variant="outline" className="animate-pulse text-purple-600 border-purple-200 bg-purple-50">Extracting fields…</Badge>
-    : extractStatus === 'ready' && fields.length > 0
-    ? <Badge variant="outline" className="text-purple-600 border-purple-200 bg-purple-50">{fields.length} fields</Badge>
-    : extractStatus === 'error'
-    ? <Badge variant="outline" className="text-red-500 border-red-200 bg-red-50">Fields failed</Badge>
-    : null;
-
-  /* ── Shared sub-elements ── */
-  const modeToggle = (
-    <div className="flex rounded-md border border-input overflow-hidden text-sm">
-      <button
-        className={cn(
-          'h-8 px-3 transition-colors',
-          mode === 'html' ? 'bg-sky-500 text-white' : 'bg-background text-muted-foreground hover:bg-accent',
-        )}
-        onClick={() => setMode('html')}
-      >
-        HTML
-      </button>
-      <button
-        className={cn(
-          'h-8 px-3 transition-colors flex items-center gap-1.5 border-l border-input',
-          mode === 'fields' ? 'bg-sky-500 text-white' : 'bg-background text-muted-foreground hover:bg-accent',
-        )}
-        onClick={() => setMode('fields')}
-      >
-        Fields
-        {fields.length > 0 && (
-          <span className={cn(
-            'text-xs rounded-full min-w-[18px] text-center px-1',
-            mode === 'fields' ? 'bg-white/20 text-white' : 'bg-muted text-muted-foreground',
-          )}>
-            {fields.length}
-          </span>
-        )}
-      </button>
-    </div>
-  );
-
-  const libraryDropdown = (inMenu = false) => (
-    <div className="relative">
-      <button
-        className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md border border-input bg-background text-sm text-muted-foreground hover:bg-accent transition-colors w-full"
-        onClick={() => setLibraryOpen(v => !v)}
-      >
-        <BookOpen className="h-3.5 w-3.5 shrink-0" />
-        <span className="truncate flex-1 text-left">
-          {selectedKey ? (library.find(i => i.key === selectedKey)?.fileName ?? 'Library') : 'Library'}
-        </span>
-        <ChevronDown className="h-3 w-3 opacity-50 shrink-0" />
-      </button>
-      {libraryOpen && (
-        <div className={cn(
-          'absolute mt-1 z-50 min-w-[260px] rounded-md border bg-white shadow-lg py-1',
-          inMenu ? 'left-0 right-0' : 'top-full left-0',
-        )}>
-          {library.length === 0 && (
-            <p className="px-3 py-2 text-sm text-muted-foreground">No documents yet.</p>
-          )}
-          {library.map(item => (
-            <button
-              key={item.key}
-              className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-accent text-left"
-              onClick={() => { setLibraryOpen(false); setMobileMenuOpen(false); void loadDoc(item.key); }}
-            >
-              <FileText className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-              <span className="truncate">{item.fileName}</span>
-              {item.status !== 'ready' && (
-                <Badge variant="warning" className="ml-auto shrink-0 text-[10px]">processing</Badge>
-              )}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-
   return (
     <div className="flex flex-col flex-1 overflow-hidden bg-background">
 
-      {/* ══════════════════════════════════════════
-          MOBILE chrome (hidden on sm+)
-          ══════════════════════════════════════════ */}
-      {!focusMode && (
-        <div className="sm:hidden flex flex-col shrink-0 bg-white border-b relative z-50">
+      {/* ── Single unified header ── */}
+      <header className="flex items-center gap-2 px-3 h-12 border-b bg-white shrink-0 relative z-50">
 
-          {/* Mobile top bar */}
-          <div className="flex items-center gap-2 px-3 h-11">
-            <button
-              onClick={() => setMobileMenuOpen(v => !v)}
-              className="h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:bg-accent transition-colors shrink-0"
-              aria-label="Toggle menu"
-            >
-              {mobileMenuOpen ? <X className="h-4 w-4" /> : <Menu className="h-4 w-4" />}
-            </button>
-
-            <span className="flex-1 text-sm truncate text-muted-foreground">
-              {docTitle || 'No document open'}
-            </span>
-
-            <div className="flex items-center gap-1.5">
-              {convertingBadge}
-              {extractBadge}
-              {modeToggle}
-              <button
-                onClick={() => void handleSave()}
-                disabled={!isReady}
-                title="Save HTML"
-                className="h-8 w-8 flex items-center justify-center rounded-md border border-sky-200 text-sky-700 hover:bg-sky-50 disabled:opacity-40 transition-colors shrink-0"
+        {/* Open dropdown */}
+        <div className="relative">
+          <button
+            onClick={() => setOpenMenuOpen(v => !v)}
+            className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md bg-sky-500 hover:bg-sky-600 text-white text-sm font-medium transition-colors"
+          >
+            <Upload className="h-3.5 w-3.5" />
+            <span>Open</span>
+            <ChevronDown className="h-3 w-3 opacity-70" />
+          </button>
+          {openMenuOpen && (
+            <div className="absolute top-full left-0 mt-1 z-50 w-72 rounded-md border bg-white shadow-lg py-1">
+              <label
+                htmlFor="docx-upload"
+                className="flex items-center gap-2 px-3 py-2 text-sm hover:bg-accent cursor-pointer"
+                onClick={() => setOpenMenuOpen(false)}
               >
-                <Save className="h-3.5 w-3.5" />
-              </button>
-              <button
-                onClick={() => void handleExportDocx()}
-                disabled={!originalKey || exportBusy}
-                title="Export DOCX"
-                className="h-8 w-8 flex items-center justify-center rounded-md border border-emerald-200 text-emerald-700 hover:bg-emerald-50 disabled:opacity-40 transition-colors shrink-0"
-              >
-                <Download className="h-3.5 w-3.5" />
-              </button>
-              {isReady && (
-                <button
-                  onClick={() => setFocusMode(true)}
-                  title="Focus document"
-                  className="h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:bg-accent transition-colors shrink-0"
-                >
-                  <Maximize2 className="h-3.5 w-3.5" />
-                </button>
+                <Upload className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                Upload new DOCX…
+              </label>
+              <input id="docx-upload" type="file" accept=".docx" className="sr-only" onChange={handleFileChange} />
+              {library.length > 0 && (
+                <>
+                  <div className="my-1 border-t" />
+                  <p className="px-3 pt-1 pb-0.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Recent</p>
+                  {library.map(item => (
+                    <button
+                      key={item.key}
+                      className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-accent text-left"
+                      onClick={() => { setOpenMenuOpen(false); void loadDoc(item.key); }}
+                    >
+                      <FileText className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                      <span className="truncate">{item.fileName}</span>
+                      {item.status !== 'ready' && (
+                        <Badge variant="warning" className="ml-auto shrink-0 text-[10px]">converting</Badge>
+                      )}
+                    </button>
+                  ))}
+                </>
               )}
             </div>
-          </div>
-
-          {/* Mobile collapsible menu */}
-          {mobileMenuOpen && (
-            <div className="px-3 pb-3 flex flex-col gap-3 border-t">
-              {/* Upload + Convert */}
-              <div className="flex items-center gap-2 pt-3 flex-wrap">
-                <label
-                  htmlFor="docx-upload-mobile"
-                  className={cn(
-                    'inline-flex items-center gap-1.5 h-8 px-3 rounded-md border text-sm cursor-pointer transition-colors flex-1 min-w-0',
-                    sourceFile
-                      ? 'border-primary/30 bg-primary/5 text-primary font-medium'
-                      : 'border-input bg-background text-muted-foreground hover:bg-accent',
-                  )}
-                >
-                  <Upload className="h-3.5 w-3.5 shrink-0" />
-                  <span className="truncate">{sourceFile ? sourceFile.name : 'Choose DOCX'}</span>
-                </label>
-                <input id="docx-upload-mobile" type="file" accept=".docx" className="sr-only" onChange={handleFileChange} />
-                <Button
-                  size="sm"
-                  className="bg-sky-500 hover:bg-sky-600 text-white border-0 shrink-0"
-                  onClick={() => { void handleConvert(); setMobileMenuOpen(false); }}
-                  disabled={!sourceFile || status === 'converting'}
-                >
-                  <Wand2 className="h-3.5 w-3.5" />
-                  Convert
-                </Button>
-              </div>
-
-              {/* Pipeline toggles */}
-              <div className="flex flex-wrap gap-2">
-                {[
-                  { label: 'HTML', checked: runHtml, set: setRunHtml },
-                  { label: 'Fields', checked: runFields, set: setRunFields },
-                  { label: 'AI Convert', checked: useAIConvert, set: setUseAIConvert },
-                  { label: 'AI Extract', checked: useAIExtract, set: setUseAIExtract },
-                ].map(({ label, checked, set }) => (
-                  <label key={label} className="inline-flex items-center gap-2 h-8 px-3 rounded-md border border-input bg-background text-sm cursor-pointer hover:bg-accent transition-colors">
-                    <input type="checkbox" checked={checked} onChange={e => set(e.target.checked)} className="w-4 h-4 rounded" />
-                    <span className="text-muted-foreground">{label}</span>
-                  </label>
-                ))}
-              </div>
-
-              {/* Library + refresh */}
-              <div className="flex items-center gap-2">
-                <div className="flex-1 min-w-0">{libraryDropdown(true)}</div>
-                <Button
-                  variant="ghost" size="icon"
-                  className="h-8 w-8 shrink-0"
-                  title="Refresh library"
-                  onClick={() => void fetchLibrary().catch(console.error)}
-                >
-                  <RefreshCw className="h-3.5 w-3.5" />
-                </Button>
-              </div>
-
-              {/* Retry + Compare + Export download */}
-              <div className="flex flex-wrap gap-2">
-                {originalKey && status !== 'converting' && runHtml && (
-                  <button
-                    onClick={() => { void retryConvert(); setMobileMenuOpen(false); }}
-                    className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md border border-input bg-background text-sm text-muted-foreground hover:bg-accent transition-colors"
-                  >
-                    <RefreshCw className="h-3 w-3" /> Retry HTML
-                  </button>
-                )}
-                {originalKey && extractStatus !== 'extracting' && runFields && (
-                  <button
-                    onClick={() => { void retryExtract(); setMobileMenuOpen(false); }}
-                    className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md border border-input bg-background text-sm text-muted-foreground hover:bg-accent transition-colors"
-                  >
-                    <RefreshCw className="h-3 w-3" /> Retry Fields
-                  </button>
-                )}
-                {canCompare && mode === 'html' && (
-                  <button
-                    onClick={() => { setShowCompare(v => !v); setMobileMenuOpen(false); }}
-                    className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md border border-input bg-background text-sm text-muted-foreground hover:bg-accent transition-colors"
-                  >
-                    <SplitSquareHorizontal className="h-3 w-3" />
-                    {showCompare ? 'Close original' : 'Compare'}
-                  </button>
-                )}
-                {exportDownloadUrl && (
-                  <a
-                    href={exportDownloadUrl}
-                    download
-                    className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md border border-emerald-300 bg-emerald-50 text-sm text-emerald-700 hover:bg-emerald-100 transition-colors"
-                  >
-                    <Download className="h-3 w-3" /> Download DOCX
-                  </a>
-                )}
-                {isReady && (
-                  <button
-                    onClick={() => { void handlePdf(); setMobileMenuOpen(false); }}
-                    className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md bg-sky-500 text-white text-sm hover:bg-sky-600 transition-colors"
-                  >
-                    <Download className="h-3 w-3" /> PDF
-                  </button>
-                )}
-              </div>
-
-              {savedAt && <p className="text-xs text-muted-foreground">Saved at {savedAt}</p>}
-            </div>
           )}
         </div>
-      )}
 
-      {/* Focus mode exit bar (mobile only) */}
-      {focusMode && (
-        <div className="sm:hidden flex items-center justify-between px-3 h-9 bg-white border-b shrink-0">
-          <span className="text-xs text-muted-foreground truncate">{docTitle}</span>
-          <div className="flex items-center gap-1.5">
-            {modeToggle}
-            <button
-              onClick={() => setFocusMode(false)}
-              className="h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:bg-accent transition-colors"
-              title="Exit focus mode"
-            >
-              <Minimize2 className="h-3.5 w-3.5" />
-            </button>
-          </div>
+        {/* Status / title */}
+        <div className="flex-1 min-w-0 flex items-center gap-2 overflow-hidden">
+          {status === 'converting' ? (
+            <Badge variant="warning" className="animate-pulse shrink-0">Converting…</Badge>
+          ) : docTitle ? (
+            <span className="text-sm text-muted-foreground truncate">{docTitle}</span>
+          ) : null}
+          {extractStatus === 'extracting' && (
+            <Badge variant="outline" className="animate-pulse text-purple-600 border-purple-200 bg-purple-50 shrink-0 text-[10px]">Extracting…</Badge>
+          )}
         </div>
-      )}
 
-      {/* ══════════════════════════════════════════
-          DESKTOP chrome (hidden on mobile)
-          ══════════════════════════════════════════ */}
+        {/* Mode toggle */}
+        <div className="flex rounded-md border border-input overflow-hidden text-sm shrink-0">
+          <button
+            className={cn('h-8 px-3 transition-colors', mode === 'html' ? 'bg-sky-500 text-white' : 'bg-background text-muted-foreground hover:bg-accent')}
+            onClick={() => setMode('html')}
+          >
+            Doc
+          </button>
+          <button
+            className={cn('h-8 px-3 transition-colors flex items-center gap-1 border-l border-input', mode === 'fields' ? 'bg-sky-500 text-white' : 'bg-background text-muted-foreground hover:bg-accent')}
+            onClick={() => setMode('fields')}
+          >
+            Fields
+            {fields.length > 0 && (
+              <span className={cn('text-xs rounded-full min-w-[16px] text-center px-0.5', mode === 'fields' ? 'bg-white/20' : 'bg-muted')}>
+                {fields.length}
+              </span>
+            )}
+          </button>
+        </div>
 
-      {/* ── Document actions bar ── */}
-      <header className="hidden sm:flex items-center gap-3 px-4 h-10 border-b bg-white shrink-0">
-        {docTitle
-          ? <span className="text-sm text-muted-foreground truncate max-w-[160px] sm:max-w-xs">{docTitle}</span>
-          : <span className="text-sm text-muted-foreground/40 italic">No document open</span>
-        }
-        <div className="ml-auto flex items-center gap-2">
-          {convertingBadge}
-          {extractBadge}
-          {originalKey && status !== 'converting' && runHtml && (
-            <button
-              onClick={() => void retryConvert()}
-              title="Retry HTML conversion"
-              className="h-6 w-6 flex items-center justify-center rounded text-muted-foreground hover:text-sky-600 hover:bg-sky-50 transition-colors"
-            >
-              <RefreshCw className="h-3 w-3" />
-            </button>
-          )}
-          {originalKey && extractStatus !== 'extracting' && runFields && (
-            <button
-              onClick={() => void retryExtract()}
-              title="Retry field extraction"
-              className="h-6 w-6 flex items-center justify-center rounded text-muted-foreground hover:text-purple-600 hover:bg-purple-50 transition-colors"
-            >
-              <RefreshCw className="h-3 w-3" />
-            </button>
-          )}
-          {savedAt && <span className="text-xs text-muted-foreground">Saved {savedAt}</span>}
-          <Button variant="outline" size="sm" className="border-sky-200 text-sky-700 hover:bg-sky-50 h-7 text-xs" onClick={() => void handleSave()} disabled={!isReady}>
-            <Save className="h-3 w-3" />
-            Save HTML
-          </Button>
-          <Button
-            variant="outline" size="sm"
-            className="border-emerald-200 text-emerald-700 hover:bg-emerald-50 h-7 text-xs"
+        {/* Export / Download */}
+        {exportDownloadUrl ? (
+          <a
+            href={exportDownloadUrl}
+            download
+            className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md bg-emerald-500 hover:bg-emerald-600 text-white text-sm font-medium transition-colors shrink-0"
+          >
+            <Download className="h-3.5 w-3.5" />
+            <span className="hidden sm:inline">Download</span>
+          </a>
+        ) : (
+          <button
             onClick={() => void handleExportDocx()}
             disabled={!originalKey || exportBusy}
+            className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md border border-emerald-200 text-emerald-700 hover:bg-emerald-50 disabled:opacity-40 text-sm transition-colors shrink-0"
           >
-            <Download className="h-3 w-3" />
-            {exportBusy ? 'Exporting…' : 'Export DOCX'}
-          </Button>
-          {exportDownloadUrl && (
-            <a
-              href={exportDownloadUrl}
-              download
-              className="inline-flex items-center gap-1 h-7 px-2 rounded border border-emerald-300 bg-emerald-50 text-xs text-emerald-700 hover:bg-emerald-100 transition-colors"
-            >
-              <Download className="h-3 w-3" />
-              Download
-            </a>
+            <Download className="h-3.5 w-3.5" />
+            <span className="hidden sm:inline">{exportBusy ? 'Exporting…' : 'Export'}</span>
+          </button>
+        )}
+
+        {/* Overflow menu */}
+        <div className="relative">
+          <button
+            onClick={() => setOverflowOpen(v => !v)}
+            className="h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:bg-accent transition-colors"
+            aria-label="More options"
+          >
+            <MoreHorizontal className="h-4 w-4" />
+          </button>
+          {overflowOpen && (
+            <div className="absolute top-full right-0 mt-1 z-50 w-56 rounded-md border bg-white shadow-lg py-1">
+              <button
+                className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-accent text-left disabled:opacity-40"
+                onClick={() => { void handleSave(); setOverflowOpen(false); }}
+                disabled={!isReady}
+              >
+                <Save className="h-3.5 w-3.5 text-muted-foreground" />
+                Save HTML
+              </button>
+              {canCompare && mode === 'html' && (
+                <button
+                  className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-accent text-left"
+                  onClick={() => { setShowCompare(v => !v); setOverflowOpen(false); }}
+                >
+                  <SplitSquareHorizontal className="h-3.5 w-3.5 text-muted-foreground" />
+                  {showCompare ? 'Close original' : 'Compare original'}
+                </button>
+              )}
+              <div className="my-1 border-t" />
+              <p className="px-3 pt-1 pb-0.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">AI</p>
+              <label className="flex items-center gap-2 px-3 py-2 text-sm hover:bg-accent cursor-pointer">
+                <input type="checkbox" checked={useAIConvert} onChange={e => setUseAIConvert(e.target.checked)} className="w-3.5 h-3.5 rounded" />
+                AI Convert
+              </label>
+              <label className="flex items-center gap-2 px-3 py-2 text-sm hover:bg-accent cursor-pointer">
+                <input type="checkbox" checked={useAIExtract} onChange={e => setUseAIExtract(e.target.checked)} className="w-3.5 h-3.5 rounded" />
+                AI Extract
+              </label>
+              {originalKey && (
+                <>
+                  <div className="my-1 border-t" />
+                  {status !== 'converting' && (
+                    <button
+                      className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-accent text-left"
+                      onClick={() => { void retryConvert(); setOverflowOpen(false); }}
+                    >
+                      <RefreshCw className="h-3.5 w-3.5 text-muted-foreground" />
+                      Retry conversion
+                    </button>
+                  )}
+                  {extractStatus !== 'extracting' && (
+                    <button
+                      className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-accent text-left"
+                      onClick={() => { void retryExtract(); setOverflowOpen(false); }}
+                    >
+                      <RefreshCw className="h-3.5 w-3.5 text-muted-foreground" />
+                      Retry extraction
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
           )}
-          <Button size="sm" className="bg-sky-500 hover:bg-sky-600 text-white border-0 h-7 text-xs" onClick={() => void handlePdf()} disabled={!isReady}>
-            <Download className="h-3 w-3" />
-            PDF
-          </Button>
         </div>
       </header>
 
-      {/* ── Toolbar ── */}
-      <div className="hidden sm:flex items-center gap-2 px-4 py-2.5 border-b bg-white shrink-0 flex-wrap">
-        <label
-          htmlFor="docx-upload"
-          className={cn(
-            'inline-flex items-center gap-1.5 h-8 px-3 rounded-md border text-sm cursor-pointer transition-colors',
-            sourceFile
-              ? 'border-primary/30 bg-primary/5 text-primary font-medium'
-              : 'border-input bg-background text-muted-foreground hover:bg-accent',
-          )}
-        >
-          <Upload className="h-3.5 w-3.5" />
-          <span className="max-w-[160px] truncate">{sourceFile ? sourceFile.name : 'Choose DOCX'}</span>
-        </label>
-        <input id="docx-upload" type="file" accept=".docx" className="sr-only" onChange={handleFileChange} />
-
-        <label className="inline-flex items-center gap-2 h-8 px-3 rounded-md border border-input bg-background text-sm cursor-pointer hover:bg-accent transition-colors">
-          <input type="checkbox" checked={runHtml} onChange={e => setRunHtml(e.target.checked)} className="w-4 h-4 rounded" />
-          <span className="text-muted-foreground">HTML</span>
-        </label>
-
-        <label className="inline-flex items-center gap-2 h-8 px-3 rounded-md border border-input bg-background text-sm cursor-pointer hover:bg-accent transition-colors">
-          <input type="checkbox" checked={runFields} onChange={e => setRunFields(e.target.checked)} className="w-4 h-4 rounded" />
-          <span className="text-muted-foreground">Fields</span>
-        </label>
-
-        <label className="inline-flex items-center gap-2 h-8 px-3 rounded-md border border-input bg-background text-sm cursor-pointer hover:bg-accent transition-colors">
-          <input type="checkbox" checked={useAIConvert} onChange={e => setUseAIConvert(e.target.checked)} className="w-4 h-4 rounded" />
-          <span className="text-muted-foreground">AI Convert</span>
-        </label>
-
-        <label className="inline-flex items-center gap-2 h-8 px-3 rounded-md border border-input bg-background text-sm cursor-pointer hover:bg-accent transition-colors">
-          <input type="checkbox" checked={useAIExtract} onChange={e => setUseAIExtract(e.target.checked)} className="w-4 h-4 rounded" />
-          <span className="text-muted-foreground">AI Extract</span>
-        </label>
-
-        <Button
-          size="sm"
-          className="bg-sky-500 hover:bg-sky-600 text-white border-0"
-          onClick={() => void handleConvert()}
-          disabled={!sourceFile || status === 'converting'}
-        >
-          <Wand2 className="h-3.5 w-3.5" />
-          Convert
-        </Button>
-
-        <Separator orientation="vertical" className="h-5 mx-1" />
-
-        {libraryDropdown()}
-
-        <Button
-          variant="ghost" size="icon"
-          className="h-8 w-8"
-          title="Refresh library"
-          onClick={() => void fetchLibrary().catch(console.error)}
-        >
-          <RefreshCw className="h-3.5 w-3.5" />
-        </Button>
-
-        {canCompare && mode === 'html' && (
-          <>
-            <Separator orientation="vertical" className="h-5 mx-1" />
-            <Button
-              variant={showCompare ? 'secondary' : 'outline'}
-              size="sm"
-              onClick={() => setShowCompare(v => !v)}
-            >
-              {showCompare
-                ? <><X className="h-3.5 w-3.5" /> Close original</>
-                : <><SplitSquareHorizontal className="h-3.5 w-3.5" /> Compare</>
-              }
-            </Button>
-          </>
-        )}
-
-        <Separator orientation="vertical" className="h-5 mx-1" />
-        {modeToggle}
-      </div>
+      {/* Convert banner — appears when a file is chosen but not yet converted */}
+      {sourceFile && !isReady && status !== 'converting' && (
+        <div className="flex items-center gap-3 px-4 py-2 border-b bg-sky-50 shrink-0">
+          <FileText className="h-4 w-4 text-sky-600 shrink-0" />
+          <span className="text-sm text-sky-700 flex-1 truncate">{sourceFile.name}</span>
+          <Button
+            size="sm"
+            className="bg-sky-500 hover:bg-sky-600 text-white border-0 shrink-0"
+            onClick={() => void handleConvert()}
+          >
+            <Wand2 className="h-3.5 w-3.5" />
+            Convert
+          </Button>
+        </div>
+      )}
 
       {/* ── Notification banner ── */}
       {notification && (
@@ -993,13 +786,12 @@ export default function DocumentWorkbench() {
       <div className="flex flex-1 overflow-hidden">
 
         {/* HTML view */}
-        <div className={cn('flex-1 overflow-hidden', mode === 'html' ? 'flex gap-0' : 'hidden')}>
-          {/* original DOCX pane */}
+        <div className={cn('flex-1 overflow-hidden', mode === 'html' ? 'flex' : 'hidden')}>
+          {/* original DOCX pane (compare mode, desktop only) */}
           {showCompare && docxSource && (
             <div className="hidden sm:flex flex-col flex-1 overflow-hidden border-r">
-              <div className="flex items-center gap-2 px-4 h-10 border-b bg-muted/30 shrink-0">
-                <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Original DOCX</span>
-                {docTitle && <span className="text-xs text-muted-foreground">· {docTitle}</span>}
+              <div className="flex items-center px-4 h-9 border-b bg-muted/30 shrink-0">
+                <span className="text-xs text-muted-foreground">Original</span>
               </div>
               <div className="flex-1 overflow-hidden">
                 <DocxPane url={docxSource} />
@@ -1009,20 +801,11 @@ export default function DocumentWorkbench() {
 
           {/* HTML editor pane */}
           <div className="flex flex-col flex-1 overflow-hidden">
-            <div className="hidden sm:flex items-center gap-2 px-4 h-10 border-b bg-muted/30 shrink-0">
-              <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Converted HTML</span>
-              {docTitle && <span className="text-xs text-muted-foreground">· {docTitle}</span>}
-              {isReady && <Badge variant="outline" className="ml-auto text-[10px] text-muted-foreground">editable</Badge>}
-            </div>
-
-            {/* Disclaimer — outside the scroll area so it stays pinned */}
+            {/* Disclaimer */}
             {isReady && (
               <div className="shrink-0 flex items-start gap-2 px-4 py-2 border-b bg-amber-50 text-xs text-amber-700">
                 <span className="shrink-0 mt-0.5">⚠</span>
-                <span>
-                  This is an approximate HTML preview — layout and styling may differ from the original.
-                  The exported DOCX will closely match the original document.
-                </span>
+                <span>Approximate preview — the exported DOCX will match the original more closely.</span>
               </div>
             )}
 
@@ -1033,21 +816,23 @@ export default function DocumentWorkbench() {
                     <FileText className="h-8 w-8 text-muted-foreground" />
                   </div>
                   <p className="text-sm text-muted-foreground max-w-xs">
-                    Choose a <strong>.docx</strong> file and click <strong>Convert</strong>, or open a document from the Library.
+                    Open a <strong>.docx</strong> file to get started.
                   </p>
                 </div>
               ) : (
-                <div className="document-pane h-full">
-                  <HtmlEditor
-                    ref={editorRef}
-                    key={docTitle}
-                    initialHtml={htmlDraft}
-                    onChange={h => {
-                      setHtmlDraft(h);
-                      localStorage.setItem(draftKey, h);
-                    }}
-                    onNodeChange={handleNodeChange}
-                  />
+                <div ref={paneRef} className="document-pane h-full">
+                  <div style={docZoom !== 1 ? { zoom: docZoom } : undefined}>
+                    <HtmlEditor
+                      ref={editorRef}
+                      key={docTitle}
+                      initialHtml={htmlDraft}
+                      onChange={h => {
+                        setHtmlDraft(h);
+                        localStorage.setItem(draftKey, h);
+                      }}
+                      onNodeChange={handleNodeChange}
+                    />
+                  </div>
                 </div>
               )}
             </div>
@@ -1056,16 +841,16 @@ export default function DocumentWorkbench() {
 
         {/* Fields view */}
         <div className={cn('flex-1 overflow-hidden', mode === 'fields' ? 'flex flex-col' : 'hidden')}>
-          <FieldPanel
-            fields={fields}
-            onFieldChange={updateFieldValue}
-          />
+          <FieldPanel fields={fields} onFieldChange={updateFieldValue} />
         </div>
       </div>
 
-      {/* close library dropdown on outside click */}
-      {libraryOpen && (
-        <div className="fixed inset-0 z-40" onClick={() => setLibraryOpen(false)} />
+      {/* Backdrop for open/overflow menus */}
+      {(openMenuOpen || overflowOpen || libraryOpen) && (
+        <div
+          className="fixed inset-0 z-40"
+          onClick={() => { setOpenMenuOpen(false); setOverflowOpen(false); setLibraryOpen(false); }}
+        />
       )}
     </div>
   );
