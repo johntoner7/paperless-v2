@@ -44,7 +44,7 @@ jobs:
           mkdir -p presign-package
           # LAMBDA_PYTHON must match the presign Lambda's configured runtime.
           # Check: aws lambda get-function-configuration --function-name paperless-presign --query Runtime
-          LAMBDA_PYTHON=3.12
+          LAMBDA_PYTHON=3.11
           pip install \
             --platform manylinux2014_x86_64 \
             --implementation cp \
