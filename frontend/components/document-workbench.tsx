@@ -626,7 +626,10 @@ export default function DocumentWorkbench() {
               <label
                 htmlFor="docx-upload"
                 className="flex items-center gap-2 px-3 py-2 text-sm hover:bg-accent cursor-pointer"
-                onClick={() => setOpenMenuOpen(false)}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setOpenMenuOpen(false);
+                }}
               >
                 <Upload className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
                 Upload document (DOCX/PDF)…
