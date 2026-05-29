@@ -614,6 +614,7 @@ export default function DocumentWorkbench() {
 
         {/* Open dropdown */}
         <div className="relative">
+          <input ref={fileInputRef} id="docx-upload" type="file" accept=".docx,.pdf" className="sr-only" onChange={handleFileChange} />
           <button
             onClick={() => setOpenMenuOpen(v => !v)}
             className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md bg-sky-500 hover:bg-sky-600 text-white text-sm font-medium transition-colors"
@@ -624,18 +625,17 @@ export default function DocumentWorkbench() {
           </button>
           {openMenuOpen && (
             <div className="absolute top-full left-0 mt-1 z-50 w-72 rounded-md border bg-white shadow-lg py-1">
-              <label
-                className="flex items-center gap-2 px-3 py-2 text-sm hover:bg-accent cursor-pointer"
+              <button
+                className="flex items-center gap-2 px-3 py-2 text-sm hover:bg-accent cursor-pointer w-full text-left"
                 onClick={(e) => {
                   e.stopPropagation();
-                  fileInputRef.current?.click();
                   setOpenMenuOpen(false);
+                  fileInputRef.current?.click();
                 }}
               >
                 <Upload className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
                 Upload document (DOCX/PDF)…
-              </label>
-              <input ref={fileInputRef} id="docx-upload" type="file" accept=".docx,.pdf" className="sr-only" onChange={handleFileChange} />
+              </button>
               {library.length > 0 && (
                 <>
                   <div className="my-1 border-t" />
