@@ -454,10 +454,9 @@ export default function DocumentWorkbench() {
     setNotification(null);
     setStatus('converting');
     try {
-      const { uploadUrl, key } = await presign(
-        sourceFile.name,
-        sourceFile.type || 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      );
+      const contentType = sourceFile.type
+        || (sourceFile.name.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+      const { uploadUrl, key } = await presign(sourceFile.name, contentType);
       const up = await fetch(uploadUrl, {
         method: 'PUT', body: sourceFile,
         headers: { 'Content-Type': sourceFile.type || 'application/octet-stream' },
@@ -545,8 +544,9 @@ export default function DocumentWorkbench() {
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0];
     if (!f) return;
-    if (!f.name.toLowerCase().endsWith('.docx')) {
-      setNotification({ type: 'error', message: 'Only .docx files are supported.' });
+    const ext = f.name.toLowerCase();
+    if (!ext.endsWith('.docx') && !ext.endsWith('.pdf')) {
+      setNotification({ type: 'error', message: 'Only .docx and .pdf files are supported.' });
       return;
     }
     setSourceFile(f); setStatus('idle'); setNotification(null);
@@ -629,9 +629,9 @@ export default function DocumentWorkbench() {
                 onClick={() => setOpenMenuOpen(false)}
               >
                 <Upload className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-                Upload new DOCX…
+                Upload document (DOCX/PDF)…
               </label>
-              <input id="docx-upload" type="file" accept=".docx" className="sr-only" onChange={handleFileChange} />
+              <input id="docx-upload" type="file" accept=".docx,.pdf" className="sr-only" onChange={handleFileChange} />
               {library.length > 0 && (
                 <>
                   <div className="my-1 border-t" />
@@ -834,7 +834,7 @@ export default function DocumentWorkbench() {
                     <FileText className="h-8 w-8 text-muted-foreground" />
                   </div>
                   <p className="text-sm text-muted-foreground max-w-xs">
-                    Open a <strong>.docx</strong> file to get started.
+                    Open a <strong>.docx</strong> or <strong>.pdf</strong> file to get started.
                   </p>
                 </div>
               ) : (
