@@ -247,6 +247,7 @@ export default function DocumentWorkbench() {
   const statusRef = useRef(status);
   const editorRef = useRef<HtmlEditorHandle>(null);
   const paneRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [docZoom, setDocZoom] = useState(1);
   const zoomLiveRef = useRef(1);   // current zoom without triggering renders mid-gesture
   const zoomBaseRef = useRef(1);   // zoom at the start of each new pinch
@@ -624,17 +625,17 @@ export default function DocumentWorkbench() {
           {openMenuOpen && (
             <div className="absolute top-full left-0 mt-1 z-50 w-72 rounded-md border bg-white shadow-lg py-1">
               <label
-                htmlFor="docx-upload"
                 className="flex items-center gap-2 px-3 py-2 text-sm hover:bg-accent cursor-pointer"
                 onClick={(e) => {
                   e.stopPropagation();
+                  fileInputRef.current?.click();
                   setOpenMenuOpen(false);
                 }}
               >
                 <Upload className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
                 Upload document (DOCX/PDF)…
               </label>
-              <input id="docx-upload" type="file" accept=".docx,.pdf" className="sr-only" onChange={handleFileChange} />
+              <input ref={fileInputRef} id="docx-upload" type="file" accept=".docx,.pdf" className="sr-only" onChange={handleFileChange} />
               {library.length > 0 && (
                 <>
                   <div className="my-1 border-t" />
