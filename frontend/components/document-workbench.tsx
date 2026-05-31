@@ -10,6 +10,8 @@ import { Badge } from '@/components/ui/badge';
 import { AlertBanner } from '@/components/ui/alert-banner';
 import { FieldPanel } from '@/components/field-panel';
 import type { ExtractedField } from '@/components/field-panel';
+import { PdfFillView } from '@/components/pdf-fill-view';
+import type { PdfPage } from '@/components/pdf-fill-view';
 import { cn } from '@/lib/utils';
 
 type ConversionState = 'idle' | 'converting' | 'ready' | 'error';
@@ -241,6 +243,8 @@ export default function DocumentWorkbench() {
   const [mode, setMode] = useState<'html' | 'fields'>('html');
   const [exportBusy, setExportBusy] = useState(false);
   const [exportDownloadUrl, setExportDownloadUrl] = useState<string | null>(null);
+  const [pdfPages, setPdfPages] = useState<PdfPage[]>([]);
+  const [pdfRoute, setPdfRoute] = useState<'acroform' | 'flat'>('flat');
   const [openMenuOpen, setOpenMenuOpen] = useState(false);
   const [overflowOpen, setOverflowOpen] = useState(false);
   const skipRestoreRef = useRef(false);
@@ -317,6 +321,58 @@ export default function DocumentWorkbench() {
       if (statusRef.current !== 'ready') setMode('fields');
     } catch {
       setExtractStatus('error');
+    }
+  }
+
+  async function runExtractPdf(key: string, force = false) {
+    setExtractStatus('extracting');
+    setPdfPages([]);
+    setExportDownloadUrl(null);
+    try {
+      const resp = await fetch(`${PRESIGN_URL}?action=extract-pdf`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key, force }),
+      });
+      if (!resp.ok) throw new Error(`PDF extraction failed (${resp.status})`);
+      const data = await resp.json() as { route: 'acroform' | 'flat'; pages: PdfPage[] };
+      setPdfPages(data.pages ?? []);
+      setPdfRoute(data.route ?? 'flat');
+      setExtractStatus('ready');
+    } catch {
+      setExtractStatus('error');
+    }
+  }
+
+  function handlePdfRegionChange(pageIndex: number, regionId: string, value: string) {
+    setPdfPages(prev =>
+      prev.map(p =>
+        p.index !== pageIndex ? p :
+        { ...p, regions: p.regions.map(r => r.id === regionId ? { ...r, value } : r) },
+      ),
+    );
+  }
+
+  async function handleExportPdf() {
+    if (!originalKey || pdfPages.length === 0) return;
+    setNotification(null);
+    setExportBusy(true);
+    setExportDownloadUrl(null);
+    try {
+      const resp = await fetch(`${PRESIGN_URL}?action=export-pdf`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ originalKey, pages: pdfPages }),
+      });
+      if (!resp.ok) throw new Error(await responseError(resp, `Export failed (${resp.status})`));
+      const { url } = await resp.json() as { url: string };
+      setExportDownloadUrl(url);
+      const filled = pdfPages.flatMap(p => p.regions).filter(r => r.value).length;
+      setNotification({ type: 'success', message: `${filled} field${filled !== 1 ? 's' : ''} stamped — ready to download.` });
+    } catch (e) {
+      setNotification({ type: 'error', message: e instanceof Error ? e.message : 'Export failed.' });
+    } finally {
+      setExportBusy(false);
     }
   }
 
@@ -454,13 +510,15 @@ export default function DocumentWorkbench() {
     if (!sourceFile) return;
     setNotification(null);
     setStatus('converting');
+    const fileIsPdf = sourceFile.name.toLowerCase().endsWith('.pdf');
     try {
-      const contentType = sourceFile.type
-        || (sourceFile.name.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+      const contentType = fileIsPdf
+        ? 'application/pdf'
+        : (sourceFile.type || 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
       const { uploadUrl, key } = await presign(sourceFile.name, contentType);
       const up = await fetch(uploadUrl, {
         method: 'PUT', body: sourceFile,
-        headers: { 'Content-Type': sourceFile.type || 'application/octet-stream' },
+        headers: { 'Content-Type': contentType },
       });
       if (!up.ok) throw new Error(`Upload failed (${up.status})`);
 
@@ -468,16 +526,21 @@ export default function DocumentWorkbench() {
       setDocTitle(title);
       setOriginalKey(key);
 
-      void runExtract(key);
+      if (fileIsPdf) {
+        await runExtractPdf(key);
+        setStatus('ready');
+        setNotification({ type: 'success', message: 'Ready to fill.' });
+      } else {
+        void runExtract(key);
+        const { html, originalUrl } = await pollHtml(key);
+        skipRestoreRef.current = true;
+        setHtmlDraft(html);
+        setDocxSource(originalUrl); setShowCompare(false);
+        setStatus('ready');
+        setNotification({ type: 'success', message: 'Conversion complete.' });
+        localStorage.setItem(`pb:draft:${title}`, html);
+      }
 
-      const { html, originalUrl } = await pollHtml(key);
-      skipRestoreRef.current = true;
-      setHtmlDraft(html);
-      setDocxSource(originalUrl); setShowCompare(false);
-      setStatus('ready');
-      setNotification({ type: 'success', message: 'Conversion complete.' });
-
-      localStorage.setItem(`pb:draft:${title}`, html);
       void fetchLibrary().catch(console.error);
     } catch (e) {
       setStatus('idle');
@@ -490,6 +553,12 @@ export default function DocumentWorkbench() {
     setStatus('converting');
     setNotification(null);
     try {
+      if (originalKey.toLowerCase().endsWith('.pdf')) {
+        await runExtractPdf(originalKey, true);
+        setStatus('ready');
+        setNotification({ type: 'success', message: 'Re-extracted.' });
+        return;
+      }
       const { html, originalUrl } = await pollHtml(originalKey);
       skipRestoreRef.current = true;
       setHtmlDraft(html);
@@ -507,12 +576,38 @@ export default function DocumentWorkbench() {
 
   async function retryExtract() {
     if (!originalKey) return;
-    await runExtract(originalKey, true);
+    if (originalKey.toLowerCase().endsWith('.pdf')) {
+      await runExtractPdf(originalKey, true);
+    } else {
+      await runExtract(originalKey, true);
+    }
   }
 
   /* load from library */
   async function loadDoc(key: string) {
     const entry = library.find(i => i.key === key);
+    const isPdfEntry = key.toLowerCase().endsWith('.pdf');
+
+    if (isPdfEntry) {
+      setNotification(null);
+      setStatus('converting');
+      try {
+        const title = stripExtension(entry?.fileName ?? key.split('/').pop() ?? key);
+        setDocTitle(title);
+        setOriginalKey(key);
+        setSourceFile(null);
+        setPdfPages([]);
+        setHtmlDraft('');
+        await runExtractPdf(key);
+        setStatus('ready');
+        setNotification({ type: 'success', message: `Opened ${entry?.fileName ?? key}` });
+      } catch (e) {
+        setStatus('idle');
+        setNotification({ type: 'error', message: e instanceof Error ? e.message : String(e) });
+      }
+      return;
+    }
+
     if (!entry || entry.status !== 'ready') {
       setNotification({ type: 'error', message: `${entry?.fileName ?? key} is still processing.` });
       return;
@@ -531,6 +626,7 @@ export default function DocumentWorkbench() {
       skipRestoreRef.current = true;
       setDocTitle(title); setSourceFile(null); setHtmlDraft(html);
       setDocxSource(result.originalUrl ?? null); setOriginalKey(key); setShowCompare(false);
+      setPdfPages([]);
       setStatus('ready');
       setNotification({ type: 'success', message: `Opened ${entry.fileName}` });
       void runExtract(key);
@@ -604,7 +700,8 @@ export default function DocumentWorkbench() {
   }
 
   const isReady = status === 'ready';
-  const canCompare = isReady && docxSource !== null;
+  const isPdfDoc = Boolean(originalKey?.toLowerCase().endsWith('.pdf'));
+  const canCompare = isReady && docxSource !== null && !isPdfDoc;
 
   return (
     <div className="flex flex-col flex-1 overflow-hidden bg-background">
@@ -671,26 +768,28 @@ export default function DocumentWorkbench() {
           )}
         </div>
 
-        {/* Mode toggle */}
-        <div className="flex rounded-md border border-input overflow-hidden text-sm shrink-0">
-          <button
-            className={cn('h-8 px-3 transition-colors', mode === 'html' ? 'bg-sky-500 text-white' : 'bg-background text-muted-foreground hover:bg-accent')}
-            onClick={() => setMode('html')}
-          >
-            Doc
-          </button>
-          <button
-            className={cn('h-8 px-3 transition-colors flex items-center gap-1 border-l border-input', mode === 'fields' ? 'bg-sky-500 text-white' : 'bg-background text-muted-foreground hover:bg-accent')}
-            onClick={() => setMode('fields')}
-          >
-            Fields
-            {fields.length > 0 && (
-              <span className={cn('text-xs rounded-full min-w-[16px] text-center px-0.5', mode === 'fields' ? 'bg-white/20' : 'bg-muted')}>
-                {fields.length}
-              </span>
-            )}
-          </button>
-        </div>
+        {/* Mode toggle — hidden for PDF (fill view is always shown in the doc pane) */}
+        {!isPdfDoc && (
+          <div className="flex rounded-md border border-input overflow-hidden text-sm shrink-0">
+            <button
+              className={cn('h-8 px-3 transition-colors', mode === 'html' ? 'bg-sky-500 text-white' : 'bg-background text-muted-foreground hover:bg-accent')}
+              onClick={() => setMode('html')}
+            >
+              Doc
+            </button>
+            <button
+              className={cn('h-8 px-3 transition-colors flex items-center gap-1 border-l border-input', mode === 'fields' ? 'bg-sky-500 text-white' : 'bg-background text-muted-foreground hover:bg-accent')}
+              onClick={() => setMode('fields')}
+            >
+              Fields
+              {fields.length > 0 && (
+                <span className={cn('text-xs rounded-full min-w-[16px] text-center px-0.5', mode === 'fields' ? 'bg-white/20' : 'bg-muted')}>
+                  {fields.length}
+                </span>
+              )}
+            </button>
+          </div>
+        )}
 
         {/* Export / Download */}
         {exportDownloadUrl ? (
@@ -704,8 +803,8 @@ export default function DocumentWorkbench() {
           </a>
         ) : (
           <button
-            onClick={() => void handleExportDocx()}
-            disabled={!originalKey || exportBusy}
+            onClick={() => void (isPdfDoc ? handleExportPdf() : handleExportDocx())}
+            disabled={!originalKey || exportBusy || (isPdfDoc && pdfPages.length === 0)}
             className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md border border-emerald-200 text-emerald-700 hover:bg-emerald-50 disabled:opacity-40 text-sm transition-colors shrink-0"
           >
             <Download className="h-3.5 w-3.5" />
@@ -724,14 +823,16 @@ export default function DocumentWorkbench() {
           </button>
           {overflowOpen && (
             <div className="absolute top-full right-0 mt-1 z-50 w-56 rounded-md border bg-white shadow-lg py-1">
-              <button
-                className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-accent text-left disabled:opacity-40"
-                onClick={() => { void handleSave(); setOverflowOpen(false); }}
-                disabled={!isReady}
-              >
-                <Save className="h-3.5 w-3.5 text-muted-foreground" />
-                Save HTML
-              </button>
+              {!isPdfDoc && (
+                <button
+                  className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-accent text-left disabled:opacity-40"
+                  onClick={() => { void handleSave(); setOverflowOpen(false); }}
+                  disabled={!isReady}
+                >
+                  <Save className="h-3.5 w-3.5 text-muted-foreground" />
+                  Save HTML
+                </button>
+              )}
               {canCompare && mode === 'html' && (
                 <button
                   className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-accent text-left"
@@ -807,62 +908,84 @@ export default function DocumentWorkbench() {
       {/* ── Workspace ── */}
       <div className="flex flex-1 overflow-hidden">
 
-        {/* HTML view */}
-        <div className={cn('flex-1 overflow-hidden', mode === 'html' ? 'flex' : 'hidden')}>
-          {/* original DOCX pane (compare mode, desktop only) */}
-          {showCompare && docxSource && (
-            <div className="hidden sm:flex flex-col flex-1 overflow-hidden border-r">
-              <div className="flex items-center px-4 h-9 border-b bg-muted/30 shrink-0">
-                <span className="text-xs text-muted-foreground">Original</span>
+        {/* PDF fill view — shown instead of HTML editor when a PDF is loaded */}
+        {isPdfDoc && (
+          <div className="flex-1 overflow-hidden">
+            {pdfPages.length > 0 ? (
+              <PdfFillView pages={pdfPages} onRegionChange={handlePdfRegionChange} />
+            ) : (
+              <div className="flex flex-col items-center justify-center h-full gap-3 text-center p-8">
+                <div className="rounded-full bg-muted p-4">
+                  <FileText className="h-8 w-8 text-muted-foreground" />
+                </div>
+                <p className="text-sm text-muted-foreground max-w-xs">
+                  {extractStatus === 'error'
+                    ? 'Field extraction failed — try re-uploading.'
+                    : 'Open a PDF file to start filling.'}
+                </p>
               </div>
-              <div className="flex-1 overflow-hidden">
-                <DocxPane url={docxSource} />
-              </div>
-            </div>
-          )}
+            )}
+          </div>
+        )}
 
-          {/* HTML editor pane */}
-          <div className="flex flex-col flex-1 overflow-hidden">
-            {/* Disclaimer */}
-            {isReady && (
-              <div className="shrink-0 flex items-start gap-2 px-4 py-2 border-b bg-amber-50 text-xs text-amber-700">
-                <span className="shrink-0 mt-0.5">⚠</span>
-                <span>Approximate preview — the exported DOCX will match the original more closely.</span>
+        {/* HTML view — DOCX only */}
+        {!isPdfDoc && (
+          <div className={cn('flex-1 overflow-hidden', mode === 'html' ? 'flex' : 'hidden')}>
+            {/* original DOCX pane (compare mode, desktop only) */}
+            {showCompare && docxSource && (
+              <div className="hidden sm:flex flex-col flex-1 overflow-hidden border-r">
+                <div className="flex items-center px-4 h-9 border-b bg-muted/30 shrink-0">
+                  <span className="text-xs text-muted-foreground">Original</span>
+                </div>
+                <div className="flex-1 overflow-hidden">
+                  <DocxPane url={docxSource} />
+                </div>
               </div>
             )}
 
-            <div className="flex-1 overflow-hidden">
-              {!isReady && !htmlDraft ? (
-                <div className="flex flex-col items-center justify-center h-full gap-3 text-center p-8">
-                  <div className="rounded-full bg-muted p-4">
-                    <FileText className="h-8 w-8 text-muted-foreground" />
-                  </div>
-                  <p className="text-sm text-muted-foreground max-w-xs">
-                    Open a <strong>.docx</strong> or <strong>.pdf</strong> file to get started.
-                  </p>
-                </div>
-              ) : (
-                <div className="document-pane h-full">
-                  <HtmlEditor
-                    ref={editorRef}
-                    key={docTitle}
-                    initialHtml={htmlDraft}
-                    onChange={h => {
-                      setHtmlDraft(h);
-                      localStorage.setItem(draftKey, h);
-                    }}
-                    onNodeChange={handleNodeChange}
-                  />
+            {/* HTML editor pane */}
+            <div className="flex flex-col flex-1 overflow-hidden">
+              {isReady && (
+                <div className="shrink-0 flex items-start gap-2 px-4 py-2 border-b bg-amber-50 text-xs text-amber-700">
+                  <span className="shrink-0 mt-0.5">⚠</span>
+                  <span>Approximate preview — the exported DOCX will match the original more closely.</span>
                 </div>
               )}
+              <div className="flex-1 overflow-hidden">
+                {!isReady && !htmlDraft ? (
+                  <div className="flex flex-col items-center justify-center h-full gap-3 text-center p-8">
+                    <div className="rounded-full bg-muted p-4">
+                      <FileText className="h-8 w-8 text-muted-foreground" />
+                    </div>
+                    <p className="text-sm text-muted-foreground max-w-xs">
+                      Open a <strong>.docx</strong> or <strong>.pdf</strong> file to get started.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="document-pane h-full">
+                    <HtmlEditor
+                      ref={editorRef}
+                      key={docTitle}
+                      initialHtml={htmlDraft}
+                      onChange={h => {
+                        setHtmlDraft(h);
+                        localStorage.setItem(draftKey, h);
+                      }}
+                      onNodeChange={handleNodeChange}
+                    />
+                  </div>
+                )}
+              </div>
             </div>
           </div>
-        </div>
+        )}
 
-        {/* Fields view */}
-        <div className={cn('flex-1 overflow-hidden', mode === 'fields' ? 'flex flex-col' : 'hidden')}>
-          <FieldPanel fields={fields} onFieldChange={updateFieldValue} />
-        </div>
+        {/* Fields view — DOCX only */}
+        {!isPdfDoc && (
+          <div className={cn('flex-1 overflow-hidden', mode === 'fields' ? 'flex flex-col' : 'hidden')}>
+            <FieldPanel fields={fields} onFieldChange={updateFieldValue} />
+          </div>
+        )}
       </div>
 
       {/* Backdrop for open/overflow menus */}

@@ -93,10 +93,43 @@ def _import_backend_module(module_name):
 
 
 def converted_html_key(source_key):
+    # kept for DOCX path
     base_no_ext = os.path.splitext(source_key)[0]
     if base_no_ext.startswith('uploads/'):
         return base_no_ext.replace('uploads/', 'converted/', 1) + '.html'
     return f'converted/{base_no_ext}.html'
+
+
+def pdf_extracted_model_key(source_key):
+    base_no_ext = os.path.splitext(source_key)[0]
+    if base_no_ext.startswith('uploads/'):
+        return base_no_ext.replace('uploads/', 'pdf-extracted/', 1) + '/model.json'
+    return f'pdf-extracted/{base_no_ext}/model.json'
+
+
+def pdf_extracted_image_key(source_key, page_index: int):
+    base_no_ext = os.path.splitext(source_key)[0]
+    if base_no_ext.startswith('uploads/'):
+        base = base_no_ext.replace('uploads/', 'pdf-extracted/', 1)
+    else:
+        base = f'pdf-extracted/{base_no_ext}'
+    return f'{base}/page-{page_index}.png'
+
+
+def _presign_image_url(img_key: str, expiry: int = 3600) -> str:
+    return s3.generate_presigned_url(
+        'get_object',
+        Params={'Bucket': BUCKET, 'Key': img_key},
+        ExpiresIn=expiry,
+    )
+
+
+def _add_image_urls_to_pages(pages: list, source_key: str) -> list:
+    out = []
+    for page in pages:
+        img_key = pdf_extracted_image_key(source_key, page['index'])
+        out.append({**page, 'image_url': _presign_image_url(img_key)})
+    return out
 
 
 def extracted_fields_key(source_key):
@@ -319,6 +352,118 @@ def lambda_handler(event, context):
             except Exception as exc:
                 logger.error('extract failed: %s', exc, exc_info=True)
                 return make_response(500, {'error': f'Extraction failed: {exc}'})
+
+        if method == 'POST' and action == 'extract-pdf':
+            # Body: {"key": "uploads/uuid/file.pdf", "force": false}
+            payload, error = parse_json_body(event)
+            if error:
+                return make_response(400, {'error': error})
+            key = payload.get('key')
+            force = payload.get('force', False)
+            if not key:
+                return make_response(400, {'error': 'key is required'})
+
+            cache_key = pdf_extracted_model_key(key)
+            if not force and object_exists(BUCKET, cache_key):
+                obj = s3.get_object(Bucket=BUCKET, Key=cache_key)
+                model = json.loads(obj['Body'].read().decode('utf-8'))
+                pages_with_urls = _add_image_urls_to_pages(model['pages'], key)
+                return make_response(200, {
+                    'cached': True,
+                    'route': model['route'],
+                    'pages': pages_with_urls,
+                })
+
+            try:
+                import tempfile
+                extract_pdf_pages = _import_backend_module('pdf_field_extractor').extract_pdf_pages
+
+                with tempfile.TemporaryDirectory() as tmp:
+                    src = os.path.join(tmp, 'original.pdf')
+                    try:
+                        s3.download_file(BUCKET, key, src)
+                    except ClientError as exc:
+                        return make_response(
+                            404 if exc.response['Error']['Code'] in ('404', 'NoSuchKey') else 502,
+                            {'error': _s3_user_message(exc, 'Download')},
+                        )
+                    result = extract_pdf_pages(src)
+
+                # Store page images separately; build model without png_bytes
+                pages_model = []
+                pages_with_urls = []
+                for page in result['pages']:
+                    png_bytes = page.pop('png_bytes')
+                    img_key = pdf_extracted_image_key(key, page['index'])
+                    s3.put_object(Bucket=BUCKET, Key=img_key, Body=png_bytes, ContentType='image/png')
+                    pages_model.append(page)
+                    pages_with_urls.append({**page, 'image_url': _presign_image_url(img_key)})
+
+                model = {'route': result['route'], 'pages': pages_model}
+                s3.put_object(
+                    Bucket=BUCKET,
+                    Key=cache_key,
+                    Body=json.dumps(model).encode('utf-8'),
+                    ContentType='application/json',
+                )
+                return make_response(200, {
+                    'cached': False,
+                    'route': model['route'],
+                    'pages': pages_with_urls,
+                })
+            except ModuleNotFoundError as exc:
+                logger.error('extract-pdf: module import failed: %s', exc)
+                return make_response(500, {'error': 'Server configuration error — deployment may be incomplete'})
+            except Exception as exc:
+                logger.error('extract-pdf failed: %s', exc, exc_info=True)
+                return make_response(500, {'error': f'PDF extraction failed: {exc}'})
+
+        if method == 'POST' and action == 'export-pdf':
+            # Body: {"originalKey": "uploads/uuid/file.pdf", "pages": [...]}
+            payload, error = parse_json_body(event)
+            if error:
+                return make_response(400, {'error': error})
+            original_key = payload.get('originalKey')
+            pages = payload.get('pages', [])
+            if not original_key:
+                return make_response(400, {'error': 'originalKey is required'})
+
+            try:
+                import tempfile
+                export_pdf = _import_backend_module('pdf_exporter').export_pdf
+
+                with tempfile.TemporaryDirectory() as tmp:
+                    src = os.path.join(tmp, 'original.pdf')
+                    try:
+                        s3.download_file(BUCKET, original_key, src)
+                    except ClientError as exc:
+                        return make_response(
+                            404 if exc.response['Error']['Code'] in ('404', 'NoSuchKey') else 502,
+                            {'error': _s3_user_message(exc, 'Download')},
+                        )
+                    out_bytes = export_pdf(src, pages)
+
+                base = os.path.splitext(os.path.basename(original_key))[0]
+                key_dir = os.path.dirname(original_key).replace('uploads/', 'exported/', 1)
+                out_key = f'{key_dir}/{base}-filled.pdf'
+                s3.put_object(
+                    Bucket=BUCKET,
+                    Key=out_key,
+                    Body=out_bytes,
+                    ContentType='application/pdf',
+                )
+                download_url = s3.generate_presigned_url(
+                    'get_object',
+                    Params={'Bucket': BUCKET, 'Key': out_key},
+                    ExpiresIn=URL_EXPIRATION,
+                )
+                return make_response(200, {'url': download_url, 'key': out_key})
+            except ModuleNotFoundError as exc:
+                logger.error('export-pdf: module import failed: %s', exc)
+                return make_response(500, {'error': 'Server configuration error — deployment may be incomplete'})
+            except Exception as exc:
+                logger.error('export-pdf failed: %s', exc, exc_info=True)
+                return make_response(500, {'error': f'PDF export failed: {exc}'})
 
         if method == 'POST':
             # expect JSON body with fileName and optional contentType
