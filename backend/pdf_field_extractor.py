@@ -113,11 +113,12 @@ def extract_pdf_pages(pdf_path: str, dpi: int = 120) -> dict:
 
     doc = fitz.open(pdf_path)
 
-    has_acroform = any(list(page.widgets()) for page in doc)
+    has_acroform = any(list(doc[i].widgets()) for i in range(len(doc)))
     route = "acroform" if has_acroform else "flat"
 
     pages = []
-    for i, page in enumerate(doc):
+    for i in range(len(doc)):
+        page = doc[i]
         rect = page.rect
         png_bytes = _render_page_png(page, dpi=dpi)
 
