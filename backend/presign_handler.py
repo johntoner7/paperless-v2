@@ -251,7 +251,7 @@ def lambda_handler(event, context):
                 return make_response(400, {'error': 'originalKey is required'})
 
             try:
-                import tempfile, os
+                import tempfile
                 apply_patches = _import_backend_module('docx_writer').apply_patches
 
                 with tempfile.TemporaryDirectory() as tmp:
@@ -307,7 +307,7 @@ def lambda_handler(event, context):
                 return make_response(200, {'cached': True, 'key': cache_key, 'fields': cached.get('fields', [])})
 
             try:
-                import tempfile, os
+                import tempfile
                 build_docx_ast = _import_backend_module('docx_ast').build_docx_ast
                 field_extractor = _import_backend_module('field_extractor')
                 extract_fields_from_ast = field_extractor.extract_fields_from_ast
