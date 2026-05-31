@@ -52,7 +52,10 @@ jobs:
             --only-binary=:all: \
             -r backend/requirements-presign.txt \
             -t presign-package/
-          cp backend/presign_handler.py backend/docx_writer.py backend/docx_node_ids.py backend/docx_ast.py backend/field_extractor.py presign-package/
+          cp backend/presign_handler.py backend/docx_writer.py backend/docx_node_ids.py \
+             backend/docx_ast.py backend/field_extractor.py \
+             backend/pdf_field_extractor.py backend/pdf_exporter.py \
+             presign-package/
           (cd presign-package && zip -r ../presign.zip .)
           aws lambda update-function-code \
             --function-name paperless-presign \
