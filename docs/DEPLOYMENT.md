@@ -139,8 +139,19 @@ This flow is robust and scales: the frontend uploads directly to S3 using a pres
 Example (from repo root):
 
 ```bash
-# package handler
-zip -j presign.zip backend/presign_handler.py
+# package handler + pdf modules + pymupdf (linux/x86_64 wheel for Lambda runtime)
+rm -rf /tmp/presign-pkg && mkdir /tmp/presign-pkg
+pip3 install \
+  --platform manylinux2014_x86_64 \
+  --target /tmp/presign-pkg \
+  --python-version 3.11 \
+  --only-binary=:all: \
+  "pymupdf>=1.24.0"
+cp backend/presign_handler.py backend/docx_writer.py backend/docx_node_ids.py \
+   backend/docx_ast.py backend/field_extractor.py \
+   backend/pdf_field_extractor.py backend/pdf_exporter.py \
+   /tmp/presign-pkg/
+cd /tmp/presign-pkg && zip -r "$OLDPWD/presign.zip" . -x "*.pyc" -x "__pycache__/*" -x "*.dist-info/*" && cd -
 
 # create function (reuse `paperless-lambda-role` or create a minimal role that allows writing/reading the bucket and logs)
 acct=$(aws sts get-caller-identity --query Account --output text)
@@ -188,7 +199,8 @@ aws s3api put-bucket-notification-configuration --bucket your-bucket --notificat
 - When invoked (with the S3 `bucket` and `key`), the renderer should read `uploads/.../name.docx`, process it, and write the result to `converted/.../name.html` (same subpath under `converted/`). This is what `presign_handler.py` expects when generating presigned GET URLs.
 
 4) Frontend configuration
-- Set `NEXT_PUBLIC_PRESIGN_URL` in your frontend environment (Vercel dashboard or `.env.local`) to the Function URL produced above. The frontend will POST `{ fileName, contentType }` to get `{ uploadUrl, key }`, then PUT the file to `uploadUrl`, then poll `GET ${PRESIGN_URL}?key=${encodeURIComponent(key)}` until ready.
+- Set `NEXT_PUBLIC_PRESIGN_URL` in your frontend environment (`.env.local` for local dev, or AWS Amplify Environment variables for the hosted build) to the Function URL produced above. The frontend will POST `{ fileName, contentType }` to get `{ uploadUrl, key }`, then PUT the file to `uploadUrl`, then poll `GET ${PRESIGN_URL}?key=${encodeURIComponent(key)}` until ready.
+- In Amplify, add the variable before building the app and redeploy after changing it, because this repo’s Next.js frontend is statically exported and reads the value at build time.
 
 Example `.env.local` (frontend folder):
 
