@@ -1,19 +1,7 @@
 FROM public.ecr.aws/lambda/python:3.9
 
-# Install pdf2htmlEX via miniconda/conda-forge.
-# Miniconda is ~200 MB; the conda-forge pdf2htmlex package adds ~400 MB.
-# This is acceptable for a POC Lambda image (10 GB limit).
-RUN yum install -y wget bzip2 && \
-    wget -q https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh \
-         -O /tmp/miniconda.sh && \
-    bash /tmp/miniconda.sh -b -p /opt/conda && \
-    rm /tmp/miniconda.sh && \
-    /opt/conda/bin/conda install -y -c conda-forge pdf2htmlex && \
-    /opt/conda/bin/conda clean -afy && \
-    ln -sf /opt/conda/bin/pdf2htmlEX /usr/local/bin/pdf2htmlEX && \
-    yum clean all
-
-ENV PDF2HTML_BIN=/usr/local/bin/pdf2htmlEX
+# PDF rendering is now handled by the presign-handler Lambda via PyMuPDF.
+# The renderer Lambda only converts DOCX→HTML and needs no pdf2htmlEX.
 
 COPY backend/ /var/task/
 

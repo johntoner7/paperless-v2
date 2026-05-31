@@ -93,7 +93,6 @@ def _import_backend_module(module_name):
 
 
 def converted_html_key(source_key):
-    # kept for DOCX path
     base_no_ext = os.path.splitext(source_key)[0]
     if base_no_ext.startswith('uploads/'):
         return base_no_ext.replace('uploads/', 'converted/', 1) + '.html'

@@ -6,8 +6,6 @@ import logging
 import json
 from urllib.parse import unquote_plus
 
-import pdf_converter
-
 LOG = logging.getLogger('lambda')
 LOG.setLevel(logging.INFO)
 
@@ -61,16 +59,9 @@ def lambda_handler(event, context):
         out = os.path.join(tmp, base + '.html')
         download_s3(bucket, key, inp)
 
-        if ext.lower() == '.pdf':
-            result = pdf_converter.convert(inp, tmp, timeout=RENDERER_TIMEOUT_SEC)
-            if not result['success']:
-                raise RuntimeError(f"pdf2htmlEX failed (exit {result['exit_code']}): {result['stderr']}")
-            out = result['html_path']
-            LOG.info('pdf2htmlEX finished in %.1fs', result['duration_sec'])
-        else:
-            try:
-                run_renderer(inp, out, use_ai=use_ai)
-            except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        try:
+            run_renderer(inp, out, use_ai=use_ai)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
                 # try LibreOffice PDF fallback
                 LOG.exception('Renderer failed; attempting LibreOffice PDF fallback')
                 pdf_out = os.path.join(tmp, base + '.pdf')
