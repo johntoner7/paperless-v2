@@ -119,36 +119,40 @@ export function PdfFillView({
   return (
     <div className="flex flex-col gap-6 p-4 overflow-y-auto h-full bg-gray-100">
       {pages.map((page) => (
+        {/* Outer div uses padding-bottom trick to establish correct aspect ratio */}
         <div
           key={page.index}
-          className="mx-auto shadow-md bg-white"
+          className="mx-auto shadow-md"
           style={{
             width: '100%',
             maxWidth: '800px',
-            aspectRatio: `${page.width_pt} / ${page.height_pt}`,
             position: 'relative',
-            containerType: 'size',
+            paddingBottom: `${(page.height_pt / page.width_pt) * 100}%`,
           }}
         >
-          {/* Page background — rendered at 120 DPI, scaled to fill container */}
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={page.image_url}
-            alt={`Page ${page.index + 1}`}
-            className="absolute inset-0 w-full h-full object-fill pointer-events-none select-none"
-            draggable={false}
-          />
-
-          {/* Editable region overlays */}
-          {page.regions.map((region) => (
-            <RegionOverlay
-              key={region.id}
-              region={region}
-              pageWidth={page.width_pt}
-              pageHeight={page.height_pt}
-              onChange={(value) => onRegionChange(page.index, region.id, value)}
+          {/* Inner div fills the padded space; containerType:'size' needs explicit dims */}
+          <div
+            className="absolute inset-0 bg-white"
+            style={{ containerType: 'size' }}
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={page.image_url}
+              alt={`Page ${page.index + 1}`}
+              className="absolute inset-0 w-full h-full object-fill pointer-events-none select-none"
+              draggable={false}
             />
-          ))}
+
+            {page.regions.map((region) => (
+              <RegionOverlay
+                key={region.id}
+                region={region}
+                pageWidth={page.width_pt}
+                pageHeight={page.height_pt}
+                onChange={(value) => onRegionChange(page.index, region.id, value)}
+              />
+            ))}
+          </div>
         </div>
       ))}
     </div>
