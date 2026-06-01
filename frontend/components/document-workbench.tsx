@@ -10,8 +10,7 @@ import { Badge } from '@/components/ui/badge';
 import { AlertBanner } from '@/components/ui/alert-banner';
 import { FieldPanel } from '@/components/field-panel';
 import type { ExtractedField } from '@/components/field-panel';
-import { PdfFillView } from '@/components/pdf-fill-view';
-import type { PdfPage } from '@/components/pdf-fill-view';
+import type { PdfPage, PdfRegion } from '@/components/pdf-fill-view';
 import { cn } from '@/lib/utils';
 
 type ConversionState = 'idle' | 'converting' | 'ready' | 'error';
@@ -221,6 +220,76 @@ const HtmlEditor = forwardRef<HtmlEditorHandle, {
     );
   }
 );
+
+/* ── PDF field list ─────────────────────────── */
+type FlatRegion = PdfRegion & { pageIndex: number };
+
+function PdfFieldList({
+  pages,
+  onRegionChange,
+}: {
+  pages: PdfPage[];
+  onRegionChange: (pageIndex: number, regionId: string, value: string) => void;
+}) {
+  const regions: FlatRegion[] = pages.flatMap(p =>
+    p.regions.map(r => ({ ...r, pageIndex: p.index })),
+  );
+
+  if (regions.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full gap-3 text-center p-8">
+        <div className="rounded-full bg-muted p-4">
+          <FileText className="h-8 w-8 text-muted-foreground" />
+        </div>
+        <p className="text-sm text-muted-foreground max-w-xs">
+          No fields found in this PDF.
+        </p>
+      </div>
+    );
+  }
+
+  const filled = regions.filter(r => r.value).length;
+
+  return (
+    <div className="flex flex-col h-full">
+      <div className="shrink-0 flex items-center gap-3 px-4 py-2 border-b bg-muted/20">
+        <span className="text-xs text-muted-foreground">{filled}/{regions.length} filled</span>
+      </div>
+      <div className="flex-1 overflow-y-auto p-4">
+        <div className="grid gap-3 max-w-5xl mx-auto sm:grid-cols-2 lg:grid-cols-3">
+          {regions.map(r => (
+            <div key={r.id} className="rounded-lg border bg-white p-4">
+              <div className="text-sm font-medium truncate mb-1">
+                {r.acroFieldName ?? r.id}
+              </div>
+              <div className="text-xs text-muted-foreground mb-3">
+                {r.type} · page {r.pageIndex + 1}
+              </div>
+              {r.type === 'checkbox' ? (
+                <label className="flex items-center gap-2 text-sm text-muted-foreground cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={r.value === 'true'}
+                    onChange={e => onRegionChange(r.pageIndex, r.id, e.target.checked ? 'true' : '')}
+                    className="h-4 w-4 rounded border-input"
+                  />
+                  Checked
+                </label>
+              ) : (
+                <input
+                  type="text"
+                  className="w-full rounded-md border border-input px-3 py-2 text-sm bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                  value={r.value}
+                  onChange={e => onRegionChange(r.pageIndex, r.id, e.target.value)}
+                />
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 /* ── Main workbench ─────────────────────────── */
 export default function DocumentWorkbench() {
@@ -910,9 +979,9 @@ export default function DocumentWorkbench() {
 
         {/* PDF fill view — shown instead of HTML editor when a PDF is loaded */}
         {isPdfDoc && (
-          <div className="flex-1 overflow-hidden">
+          <div className="flex-1 overflow-hidden flex flex-col">
             {pdfPages.length > 0 ? (
-              <PdfFillView pages={pdfPages} onRegionChange={handlePdfRegionChange} />
+              <PdfFieldList pages={pdfPages} onRegionChange={handlePdfRegionChange} />
             ) : (
               <div className="flex flex-col items-center justify-center h-full gap-3 text-center p-8">
                 <div className="rounded-full bg-muted p-4">

@@ -119,7 +119,6 @@ export function PdfFillView({
   return (
     <div className="flex flex-col gap-6 p-4 overflow-y-auto h-full bg-gray-100">
       {pages.map((page) => (
-        {/* Outer div uses padding-bottom trick to establish correct aspect ratio */}
         <div
           key={page.index}
           className="mx-auto shadow-md"
