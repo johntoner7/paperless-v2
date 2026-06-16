@@ -193,14 +193,114 @@ def _build_blocks(
             block = _build_table(child, styles, relationships, media, table_styles)
         else:
             continue
-        pb = _get_page_break_info(child)
-        if pb:
-            if pb.get("at_start"):
-                block["page_break_before"] = True
-            else:
-                block["page_break_info"] = pb
+        # Explicit w:br type="page" inside runs → split into separate pages
+        if tag == "p" and not block.get("page_break_before"):
+            block = _promote_explicit_page_breaks(block, blocks)
+            if block is None:
+                continue
+
+        # w:pageBreakBefore paragraph property
+        if block.get("style", {}).get("page_break_before"):
+            block["page_break_before"] = True
+
+        # lastRenderedPageBreak hints (fallback for reflowed content)
+        if not block.get("page_break_before"):
+            pb = _get_page_break_info(child)
+            if pb:
+                if pb.get("at_start"):
+                    block["page_break_before"] = True
+                else:
+                    block["page_break_info"] = pb
         blocks.append(block)
     return blocks
+
+
+def _promote_explicit_page_breaks(block: dict, blocks: list[dict]) -> dict | None:
+    """Split a paragraph at explicit w:br type=page breaks.
+
+    Runs before the first page break are appended to `blocks` as a completed
+    paragraph. The first run after the break starts a new paragraph with
+    page_break_before=True, which is returned. If the break is the very first
+    thing in the paragraph the original block is returned with page_break_before
+    set. Returns None only if the paragraph was entirely consumed into `blocks`.
+    """
+    children = block.get("children", [])
+    # Flatten: collect (run_index, child_index) of every page break
+    split_points: list[tuple[int, int]] = []
+    for ri, run in enumerate(children):
+        if run.get("type") != "run":
+            continue
+        for ci, ch in enumerate(run.get("children", [])):
+            if ch.get("type") == "break" and ch.get("break_type") == "page":
+                split_points.append((ri, ci))
+
+    if not split_points:
+        return block
+
+    def _slice_run(run: dict, start: int, end: int | None) -> dict | None:
+        inner = run.get("children", [])[start:end]
+        if not inner:
+            return None
+        return {**run, "children": inner}
+
+    def _build_para(runs: list[dict], base: dict) -> dict:
+        return {k: v for k, v in base.items() if k != "children"} | {"children": runs}
+
+    segments: list[list[dict]] = []
+    current: list[dict] = []
+    ri_prev, ci_prev = 0, 0
+
+    for ri, ci in split_points:
+        # Collect runs before this break
+        for i in range(ri_prev, ri):
+            run = children[i]
+            if run.get("type") != "run":
+                current.append(run)
+                continue
+            sliced = _slice_run(run, ci_prev if i == ri_prev else 0, None)
+            if sliced:
+                current.append(sliced)
+            ci_prev = 0
+        # Partial run up to (not including) the break char
+        run = children[ri]
+        if run.get("type") == "run":
+            before = _slice_run(run, ci_prev if ri == ri_prev else 0, ci)
+            if before:
+                current.append(before)
+        segments.append(current)
+        current = []
+        ri_prev, ci_prev = ri, ci + 1  # skip the break itself
+
+    # Tail after last break
+    for i in range(ri_prev, len(children)):
+        run = children[i]
+        if run.get("type") != "run":
+            current.append(run)
+            continue
+        sliced = _slice_run(run, ci_prev if i == ri_prev else 0, None)
+        if sliced:
+            current.append(sliced)
+        ci_prev = 0
+    segments.append(current)
+
+    # First segment → flush to blocks (inherits original block's page_break_before)
+    first_para = _build_para(segments[0], block)
+    if segments[0]:
+        blocks.append(first_para)
+
+    # Middle segments (if any multi-break)
+    for seg in segments[1:-1]:
+        p = _build_para(seg, block)
+        p["page_break_before"] = True
+        blocks.append(p)
+
+    # Last segment → returned as the new "current" block
+    last = _build_para(segments[-1], block)
+    last["page_break_before"] = True
+    if not segments[-1]:
+        # Nothing after the last break — no block to return
+        return None
+    return last
 
 
 def _get_page_break_info(elem: ET.Element) -> dict | None:
@@ -322,6 +422,9 @@ def _extract_paragraph_style(paragraph: ET.Element, styles: dict) -> dict:
         if indent:
             style["indent"] = indent
 
+    if ppr.find(f"{W_NS}pageBreakBefore") is not None:
+        style["page_break_before"] = True
+
     num_pr = ppr.find(f"{W_NS}numPr")
     if num_pr is not None:
         num_id_elem = num_pr.find(f"{W_NS}numId")
@@ -361,7 +464,11 @@ def _build_run(run: ET.Element, relationships: dict, media: dict) -> dict:
         elif tag == "tab":
             children.append({"type": "break", "break_type": "tab"})
         elif tag in ("br", "cr"):
-            children.append({"type": "break", "break_type": "line"})
+            br_type = child.get(f"{W_NS}type") or child.get("type")
+            if br_type == "page":
+                children.append({"type": "break", "break_type": "page"})
+            else:
+                children.append({"type": "break", "break_type": "line"})
         elif tag == "drawing":
             img = _build_image(child, relationships, media)
             if img is not None:
